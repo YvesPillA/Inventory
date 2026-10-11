@@ -1,0 +1,12 @@
+.toolchain/
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
+.idea/
+.signing/
+captures/
+artifacts/*.apk
+artifacts/*-源码.zip
+**/__pycache__/

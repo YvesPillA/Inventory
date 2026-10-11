@@ -1,0 +1,11 @@
+
+com.fieldstock.app.ExportRecoveryInstrumentedTest:.
+com.fieldstock.app.ManualWorkflowTest:.......
+com.fieldstock.app.data.RepositoryInstrumentedTest:.......
+com.fieldstock.app.scan.OcrInstrumentedTest:..
+
+Time: 17.622
+
+OK (17 tests)
+
+
