@@ -4,6 +4,7 @@ data class InventoryTask(val id: String, val name: String, val createdAt: Long)
 data class Country(val id: String, val name: String)
 data class Warehouse(val id: String, val countryId: String, val name: String)
 enum class ItemKind { PART, MACHINE }
+enum class DuplicateMode { ADD_QUANTITY, NEW_ENTRY }
 data class StockRecord(
     val id: String, val taskId: String, val warehouseId: String, val kind: ItemKind,
     val bom: String, val sn: String, val quantity: Int, val condition: String, val note: String,
@@ -12,6 +13,7 @@ data class StockRecord(
     val createdAt: Long, val updatedAt: Long, val voided: Boolean
 )
 data class ChangeLog(val id: String, val recordId: String, val action: String, val before: String, val after: String, val at: Long)
+data class MutationResult(val processed: Int, val duplicateMachines: List<StockRecord> = emptyList())
 data class InventorySnapshot(
     val tasks: List<InventoryTask> = emptyList(), val countries: List<Country> = emptyList(),
     val warehouses: List<Warehouse> = emptyList(), val records: List<StockRecord> = emptyList(),

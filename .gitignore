@@ -10,3 +10,5 @@ captures/
 artifacts/*.apk
 artifacts/*-源码.zip
 **/__pycache__/
+
+.kotlin/

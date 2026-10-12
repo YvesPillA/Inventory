@@ -170,11 +170,12 @@ class RepositoryInstrumentedTest {
         repository.voidRecord(voidedMachine.id)
         val replacement = repository.save(input.copy(kind = ItemKind.MACHINE, sn = "AA-001", warehouseId = other.id))
         val beforeConflict = repository.snapshot()
-        assertTrue(runCatching { repository.restoreVoided(voidedMachine.id) }.exceptionOrNull() is DuplicateSnException)
+        assertEquals(0, repository.restoreVoided(voidedMachine.id).processed)
         assertEquals(beforeConflict, repository.snapshot())
         repository.deleteVoided(voidedMachine.id)
         assertTrue(repository.snapshot().changes.none { it.recordId == voidedMachine.id })
-        val restored = repository.restoreVoided(voidedPart.id)
+        assertEquals(1, repository.restoreVoided(voidedPart.id).processed)
+        val restored = repository.snapshot().records.single { it.id == voidedPart.id }
         assertEquals("损坏", restored.condition)
         assertEquals(5, restored.quantity)
         assertEquals(2, repository.clearActive(current.id))
@@ -218,7 +219,7 @@ class RepositoryInstrumentedTest {
         assertEquals(1, state.changes.count { it.action == "VOID" })
         assertEquals(1, repository.pendingMigrationVoidedCount())
         assertEquals(0, repository.restore(state))
-        assertTrue(runCatching { repository.restoreVoided(first.id) }.exceptionOrNull() is DuplicateSnException)
+        assertEquals(0, repository.restoreVoided(first.id).processed)
         repository.close()
         SQLiteDatabase.openDatabase(databasePath, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
             val duplicate = db.query("records", null, "id = ?", arrayOf("legacy-newer"), null, null, null).use { cursor ->

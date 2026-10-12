@@ -1,0 +1,8 @@
+2026-10-12 Android 11/API30, 360x640dp, emulator-5556, airplane mode, no Google Play services.
+PASS: 0.2.0 release seeded QA / Upgrade, UPG0001 quantity 7.
+PASS: same-signer cover installation of 0.2.1 retains warehouse and UPG0001 quantity 7.
+PASS: actual Android CreateDocument saves 39-byte UTF-8 BOM CSV template, header only.
+PASS: actual Android CreateDocument saves XLSX; ZIP integrity valid, detail contains UPG0001 quantity 7.
+PASS: actual OpenDocument reads UTF-8 CSV; ADD_QUANTITY changes 7 to 10, duplicate machine goes to voided with aggregated BOM/SN prompt.
+PASS: actual CreateDocument saves JSON; SHA256 verifies, records=3, part quantity=10, active machines=1, voided duplicate=1.
+PASS: final 0.2.1 release replaced test build without uninstall; UPG0001 quantity 10 retained.

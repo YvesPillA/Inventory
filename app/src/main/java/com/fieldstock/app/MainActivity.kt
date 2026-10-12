@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -84,6 +85,9 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     var scanField by rememberSaveable { mutableStateOf("BOM") }
     var switchWarehouse by remember { mutableStateOf<String?>(null) }
     var pendingSave by remember { mutableStateOf<RecordInput?>(null) }
+    var pendingParts by remember { mutableStateOf(false) }
+    var pendingDuplicateSave by remember { mutableStateOf(false) }
+    var pendingRestore by remember { mutableStateOf<StockRecord?>(null) }
     var saveWarning by remember { mutableStateOf("") }
     var confirmVoid by remember { mutableStateOf<StockRecord?>(null) }
     var confirmDelete by remember { mutableStateOf<StockRecord?>(null) }
@@ -106,13 +110,13 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         sourceBom = record.sourceBom; sourceSn = record.sourceSn; rawBom = record.rawBom; rawSn = record.rawSn
         editingId = record.id; attempted = false; keepBom = false; page = 0
     }
-    fun submit(input: RecordInput) {
+    fun submit(input: RecordInput, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
         focus.clearFocus()
         val updateId = editingId
         vm.duplicateOnRestore = false
-        vm.perform(if (updateId == null) "已保存" else "已保存修改", after = {
-            clearForm(keepBom && input.kind == ItemKind.MACHINE && updateId == null)
-        }) { it.save(input, updateId) }
+        val after = { clearForm(keepBom && input.kind == ItemKind.MACHINE && updateId == null) }
+        if (updateId == null) vm.performMutation("已保存", after = after) { it.saveIncoming(input, mode) }
+        else vm.perform("已保存修改", after = after) { it.save(input, updateId) }
     }
     fun chooseWarehouse(id: String) {
         if (id != vm.warehouseId && dirty) switchWarehouse = id
@@ -133,6 +137,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     val createXlsx = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), vm::export)
     val createCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip"), vm::export)
     val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json"), vm::export)
+    val createTemplate = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv"), vm::export)
+    val importFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewImport)
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewRestore)
     fun restoreBackup() {
         if (dirty) vm.error = "还有未保存输入，请先保存或清空后再恢复备份"
@@ -145,7 +151,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     } else Scaffold(containerColor = Mist, topBar = { WarehouseHeader(vm.warehouseLabel(vm.warehouseId)) }, bottomBar = {
         if (!keyboardVisible) NavigationBar(containerColor = Color.White) {
             val icons = listOf(Icons.Default.Edit, Icons.Default.List, Icons.Default.Share, Icons.Default.Settings)
-            listOf("盘点", "记录", "导出", "设置").forEachIndexed { index, title ->
+            listOf("盘点", "记录", "处理", "设置").forEachIndexed { index, title ->
                 NavigationBarItem(selected = page == index, onClick = { focus.clearFocus(); page = index },
                     icon = { Icon(icons[index], contentDescription = title) }, label = { Text(title) }, enabled = !vm.busy)
             }
@@ -205,18 +211,24 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                                 val snValid = kind != "MACHINE" || (pending && sn.isBlank()) || IdentifierRules.validateSn(sn.trim()) == null
                                 if (pending && bom.isBlank() && sn.isBlank() && note.isBlank()) vm.error = "待核查记录至少填写一个编号或备注"
                                 else if (bomValid && snValid && count != null && count in 1..1_000_000_000) {
+                                    focus.clearFocus()
                                     val previous = vm.snapshot.records.find { it.id == editingId }
                                     val input = RecordInput(previous?.taskId ?: vm.storageTaskId, vm.warehouseId, ItemKind.valueOf(kind), bom.trim(),
                                         if (kind == "MACHINE") sn.trim() else "", count, condition, note.trim(), location = previous?.location.orEmpty(),
                                         sourceBom = sourceBom, sourceSn = if (kind == "MACHINE") sourceSn else "manual", rawBom = rawBom, rawSn = if (kind == "MACHINE") rawSn else "")
                                     val active = vm.snapshot.records.filter { !it.voided && it.id != editingId }
-                                    val parts = active.filter { it.kind == ItemKind.PART && it.warehouseId == vm.warehouseId && it.bom == input.bom && it.condition == input.condition }
+                                    val parts = active.filter { input.bom.isNotEmpty() && it.kind == ItemKind.PART && it.warehouseId == vm.warehouseId && it.bom == input.bom && it.condition == input.condition }
                                     val closeSn = active.find { it.kind == ItemKind.MACHINE && it.sn != input.sn && it.sn.equals(input.sn, true) }
                                     if (editingId == null && kind == "PART" && parts.isNotEmpty()) {
-                                        saveWarning = "此 BOM 和状态已有 ${parts.sumOf { it.quantity.toLong() }} 件，本次再追加 ${input.quantity} 件。若要修正数量，请取消并修改原记录。"
+                                        saveWarning = "${vm.warehouseLabel(vm.warehouseId)}\nBOM：${input.bom} · ${input.condition}\n已有 ${parts.sumOf { it.quantity.toLong() }} 件，本次 ${input.quantity} 件。请选择相加到已有记录，或单独新增条目。"
+                                        pendingParts = true; pendingDuplicateSave = false
                                         pendingSave = input
+                                    } else if (editingId == null && kind == "MACHINE" && active.any { it.kind == ItemKind.MACHINE && it.sn == input.sn && input.sn.isNotEmpty() }) {
+                                        saveWarning = "SN：${input.sn}\n这个 SN 已有正常记录。确认后，本次新录入的整机将转入作废页，已有正常记录保持。"
+                                        pendingParts = false; pendingDuplicateSave = true; pendingSave = input
                                     } else if (kind == "MACHINE" && closeSn != null) {
                                         saveWarning = "已有 ${closeSn.sn} 与本次 ${input.sn} 仅大小写不同，请核对是否为不同编号。"
+                                        pendingParts = false; pendingDuplicateSave = false
                                         pendingSave = input
                                     } else submit(input)
                                 }
@@ -231,15 +243,20 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     }
                 }
                 1 -> RecordsPage(vm, onEdit = { if (dirty) vm.error = "还有未保存输入，请先保存或清空" else editRecord(it) },
-                    onVoid = { confirmVoid = it }, onRestore = { vm.restoreVoided(it.id) }, onDelete = { confirmDelete = it },
+                    onVoid = { confirmVoid = it }, onRestore = { record ->
+                        if (record.kind == ItemKind.PART && record.bom.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.PART && it.warehouseId == record.warehouseId && it.bom == record.bom && it.condition == record.condition }) pendingRestore = record
+                        else if (record.kind == ItemKind.MACHINE && record.sn.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.MACHINE && it.sn == record.sn }) pendingRestore = record
+                        else vm.performMutation("记录已还原") { it.restoreVoided(record.id) }
+                    }, onDelete = { confirmDelete = it },
                     onClear = { clearRecords = it; activeClearStep = 0 })
-                2 -> ExportPage(vm) { type ->
+                2 -> ProcessingPage(vm, onExport = { type ->
                     val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
                     vm.prepareExport(type, type != "backup") {
                         when (type) { "xlsx" -> createXlsx.launch("盘库_${stamp}.xlsx"); "csv" -> createCsv.launch("盘库CSV_${stamp}.zip"); else -> createBackup.launch("盘库完整备份_${stamp}.json") }
                     }
-                }
-                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup)
+                }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("text/csv", "text/comma-separated-values", "application/vnd.ms-excel", "text/plain")) },
+                    onTemplate = { vm.prepareExport("template", false) { createTemplate.launch("盘库导入模板.csv") } })
+                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false })
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
         }
@@ -255,7 +272,18 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         clearForm(); keepBom = false; vm.select(next); entered = true; page = 0; switchWarehouse = null
     } }
     if (confirmClearInput) ConfirmDialog("清空未保存输入？", "已保存的记录不受影响。", "清空输入", { confirmClearInput = false }) { clearForm(); keepBom = false; confirmClearInput = false }
-    pendingSave?.let { input -> ConfirmDialog("核对后保存", saveWarning, "确认保存", { pendingSave = null }) { pendingSave = null; submit(input) } }
+    pendingSave?.let { input ->
+        if (pendingParts) DuplicateModeDialog("相同配件如何入库？", saveWarning, { pendingSave = null }) { mode -> pendingSave = null; submit(input, mode) }
+        else ConfirmDialog(if (pendingDuplicateSave) "发现重复 SN" else "核对后保存", saveWarning,
+            if (pendingDuplicateSave) "确认转入作废" else "确认保存", { pendingSave = null }) { pendingSave = null; submit(input) }
+    }
+    pendingRestore?.let { record ->
+        if (record.kind == ItemKind.PART) DuplicateModeDialog("相同配件如何还原？", "${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom} · ${record.condition}\n还原数量：${record.quantity} 件。", { pendingRestore = null }) { mode ->
+            pendingRestore = null; vm.performMutation("记录已还原") { it.restoreVoided(record.id, mode) }
+        } else ConfirmDialog("SN 已存在，保持作废", "SN：${record.sn}\n已有正常整机占用这个 SN，本条记录将保留在作废页。", "确认保留作废", { pendingRestore = null }) {
+            pendingRestore = null; vm.performMutation("重复记录保留作废") { it.restoreVoided(record.id) }
+        }
+    }
     confirmVoid?.let { record -> ConfirmDialog("作废这条记录？", "${record.bom}\n${record.sn}\n作废后不再计数，可以在作废页还原。", "确认作废", { confirmVoid = null }) {
         confirmVoid = null; vm.perform("记录已作废") { it.voidRecord(record.id) }
     } }
@@ -280,10 +308,15 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     vm.duplicate?.let { record -> AlertDialog(onDismissRequest = { vm.duplicate = null }, title = { Text(if (vm.duplicateOnRestore) "SN 已存在，未还原" else "SN 已经录入") },
         text = { Text("${record.sn}\n${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom}\n${if (vm.duplicateOnRestore) "SN 必须唯一，这条记录仍保留在作废页。" else "本次没有新增记录，请核查是否重复盘点。"}") },
         confirmButton = { TextButton(onClick = { vm.duplicate = null }) { Text(if (vm.duplicateOnRestore) "保留作废" else "返回核对") } }) }
+    if (vm.duplicateSummary.isNotEmpty()) AlertDialog(onDismissRequest = { vm.duplicateSummary = emptyList() }, title = { Text("重复 SN 已保留在作废页") },
+        text = { Column(Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+            Text("本次共 ${vm.duplicateSummary.size} 条重复整机记录，已统一保留在作废页。已有正常记录保持。")
+            vm.duplicateSummary.forEach { Text("BOM：${it.bom}\nSN：${it.sn}\n${vm.warehouseLabel(it.warehouseId)}", modifier = Modifier.padding(top = 8.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
+        } }, confirmButton = { TextButton(onClick = { vm.duplicateSummary = emptyList() }) { Text("知道了") } })
     vm.error?.let { message -> AlertDialog(onDismissRequest = { vm.error = null }, title = { Text("操作未完成") }, text = { Text(message) }, confirmButton = { TextButton(onClick = { vm.error = null }) { Text("知道了") } }) }
-    vm.restoreCandidate?.let { candidate -> ConfirmDialog("合并这个备份？", "包含 ${candidate.warehouses.size} 个仓库、${candidate.records.size} 条记录。相同记录不重复增加，冲突时整次取消。", "检查并合并", { vm.restoreCandidate = null }) {
+    vm.restoreCandidate?.let { candidate -> ConfirmDialog("合并这个备份？", "包含 ${candidate.warehouses.size} 个仓库、${candidate.records.size} 条记录。相同记录不重复增加，同 ID 内容冲突时整次取消。新增重复 SN 的整机保留在作废页。\n${vm.restoreDuplicateNotice(candidate)}", "检查并合并", { vm.restoreCandidate = null }) {
         vm.restoreCandidate = null; vm.duplicateOnRestore = false
-        vm.perform("备份已合并") { it.restore(candidate) }
+        vm.restoreBackup(candidate)
     } }
     if (vm.migrationVoidedCount > 0) AlertDialog(onDismissRequest = {}, title = { Text("旧记录已按 SN 唯一规则整理") }, text = {
         Text("旧任务合并后有 ${vm.migrationVoidedCount} 条重复 SN 记录。每个 SN 保留最近修改的一条，其他移入作废页，原记录和修改历史均保留。")
@@ -321,6 +354,16 @@ private fun ScanButton(field: String, enabled: Boolean, scan: () -> Unit) {
 
 @Composable
 internal fun ConfirmDialog(title: String, message: String, confirm: String, dismiss: () -> Unit, action: () -> Unit) {
-    AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message) },
+    AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message, Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) },
         confirmButton = { TextButton(onClick = action) { Text(confirm) } }, dismissButton = { TextButton(onClick = dismiss) { Text("取消") } })
+}
+
+@Composable
+internal fun DuplicateModeDialog(title: String, message: String, dismiss: () -> Unit, choose: (DuplicateMode) -> Unit) {
+    AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message) },
+        confirmButton = { Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { choose(DuplicateMode.ADD_QUANTITY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("添加到已有数量") }
+            OutlinedButton(onClick = { choose(DuplicateMode.NEW_ENTRY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("新增条目") }
+            TextButton(onClick = dismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        } })
 }

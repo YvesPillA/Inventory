@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.fieldstock.app.model.Country
 import com.fieldstock.app.model.DuplicateSnException
+import com.fieldstock.app.model.DuplicateMode
 import com.fieldstock.app.model.InventorySnapshot
 import com.fieldstock.app.model.InventoryTask
 import com.fieldstock.app.model.ItemKind
@@ -173,7 +174,8 @@ class InventoryRepositoryTest {
         val fixture = fixture()
         val first = repository.save(input(fixture).copy(condition = "损坏", quantity = 7, note = "包装破损", location = "A-01"))
         repository.voidRecord(first.id)
-        val restored = repository.restoreVoided(first.id)
+        assertEquals(1, repository.restoreVoided(first.id).processed)
+        val restored = repository.snapshot().records.single()
         assertEquals(first.copy(updatedAt = restored.updatedAt), restored)
         val state = repository.snapshot()
         val audit = state.changes.single { it.action == "RESTORE" }
@@ -193,11 +195,13 @@ class InventoryRepositoryTest {
         val otherWarehouse = repository.addWarehouse(fixture.country.id, "另一个仓库")
         val replacement = repository.save(input(fixture, ItemKind.MACHINE, sn = first.sn).copy(taskId = otherTask.id, warehouseId = otherWarehouse.id))
         val before = repository.snapshot()
-        val conflict = assertThrows(DuplicateSnException::class.java) { repository.restoreVoided(first.id) }
-        assertEquals(replacement.id, conflict.existing.id)
+        val conflict = repository.restoreVoided(first.id)
+        assertEquals(0, conflict.processed)
+        assertEquals(first.id, conflict.duplicateMachines.single().id)
         assertEquals(before, repository.snapshot())
         repository.voidRecord(replacement.id)
-        assertFalse(repository.restoreVoided(first.id).voided)
+        assertEquals(1, repository.restoreVoided(first.id).processed)
+        assertFalse(repository.snapshot().records.single { it.id == first.id }.voided)
     }
 
     @Test
@@ -433,11 +437,12 @@ class InventoryRepositoryTest {
         val first = repository.save(input(fixture, ItemKind.MACHINE, sn = "AbC-123"))
         val before = repository.snapshot()
         val duplicate = first.copy(id = "second-machine")
-        assertThrows(DuplicateSnException::class.java) {
-            repository.restore(InventorySnapshot(records = listOf(duplicate)))
-        }
-        assertEquals(before, repository.snapshot())
-        assertEquals(1, repository.restore(InventorySnapshot(records = listOf(duplicate.copy(voided = true)))))
+        val incoming = InventorySnapshot(records = listOf(duplicate))
+        assertEquals(1, repository.restore(incoming))
+        assertTrue(repository.snapshot().records.single { it.id == duplicate.id }.voided)
+        val imported = repository.snapshot()
+        assertEquals(0, repository.restore(incoming))
+        assertEquals(imported, repository.snapshot())
         assertEquals(2, repository.snapshot().records.size)
     }
 
@@ -481,11 +486,12 @@ class InventoryRepositoryTest {
         )
         val before = repository.snapshot()
         val otherTask = InventoryTask("legacy-task", "旧任务", 10)
-        assertThrows(DuplicateSnException::class.java) {
-            repository.restore(InventorySnapshot(tasks = listOf(otherTask),
-                records = listOf(template, template.copy(id = "machine-b", taskId = otherTask.id))))
-        }
-        assertEquals(before, repository.snapshot())
+        val incoming = InventorySnapshot(tasks = listOf(otherTask),
+            records = listOf(template, template.copy(id = "machine-b", taskId = otherTask.id)))
+        assertEquals(2, repository.restore(incoming))
+        assertEquals(1, repository.snapshot().records.count { !it.voided })
+        assertEquals(1, repository.snapshot().records.count { it.voided })
+        assertEquals(0, repository.restore(incoming))
     }
 
     @Test
@@ -523,7 +529,7 @@ class InventoryRepositoryTest {
         val winner = migrated.records.single { !it.voided }
         val edited = repository.save(input(fixture, ItemKind.MACHINE, sn = winner.sn).copy(taskId = winner.taskId, note = "核对保留"), winner.id)
         assertEquals("核对保留", edited.note)
-        assertThrows(DuplicateSnException::class.java) { repository.restoreVoided(first.id) }
+        assertEquals(0, repository.restoreVoided(first.id).processed)
         assertThrows(DuplicateSnException::class.java) { repository.save(input(fixture, ItemKind.MACHINE, sn = winner.sn)) }
         repository.close()
         repository = InventoryRepository(context)
@@ -539,6 +545,169 @@ class InventoryRepositoryTest {
         put("location", record.location); put("source_bom", record.sourceBom); put("source_sn", record.sourceSn)
         put("raw_bom", record.rawBom); put("raw_sn", record.rawSn); put("created_at", record.createdAt)
         put("updated_at", record.updatedAt); put("voided", if (record.voided) 1 else 0)
+    }
+
+    @Test
+    fun incomingPartsMergeByWarehouseBomAndConditionAndKeepSourceDetails() {
+        val fixture = fixture()
+        val first = repository.save(input(fixture).copy(quantity = 4, location = "A", note = "原备注"))
+        assertEquals(1, repository.saveIncoming(input(fixture).copy(quantity = 6, location = "B", note = "来源备注", sourceBom = "import"), DuplicateMode.ADD_QUANTITY).processed)
+        val merged = repository.snapshot().records.single()
+        assertEquals(first.id, merged.id)
+        assertEquals(10, merged.quantity)
+        assertTrue(merged.note.contains("原备注") && merged.note.contains("来源备注") && merged.note.contains("B"))
+        repository.saveIncoming(input(fixture).copy(condition = "损坏"), DuplicateMode.ADD_QUANTITY)
+        repository.saveIncoming(input(fixture), DuplicateMode.NEW_ENTRY)
+        assertEquals(3, repository.snapshot().records.size)
+        assertEquals(0, repository.restore(repository.snapshot()))
+    }
+
+    @Test
+    fun incomingDuplicateMachinesAreRetainedVoidedAndReportedOnce() {
+        val fixture = fixture()
+        val machine = input(fixture, ItemKind.MACHINE, "AA-001")
+        repository.saveIncoming(machine, DuplicateMode.NEW_ENTRY)
+        val result = repository.importRecords(listOf(machine, machine.copy(sn = "BB-002"), machine.copy(sn = "BB-002")), DuplicateMode.ADD_QUANTITY)
+        assertEquals(3, result.processed)
+        assertEquals(2, result.duplicateMachines.size)
+        assertTrue(result.duplicateMachines.all { it.voided })
+        assertEquals(2, repository.snapshot().records.count { !it.voided })
+        assertEquals(2, repository.snapshot().records.count { it.voided })
+        assertEquals(0, repository.restore(repository.snapshot()))
+    }
+
+    @Test
+    fun batchImportAndQuantityOverflowRollbackEverything() {
+        val fixture = fixture()
+        val before = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.importRecords(listOf(input(fixture), input(fixture).copy(bom = "bad/code")), DuplicateMode.ADD_QUANTITY)
+        }
+        assertEquals(before, repository.snapshot())
+        repository.save(input(fixture).copy(quantity = 1_000_000_000))
+        val full = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) { repository.saveIncoming(input(fixture), DuplicateMode.ADD_QUANTITY) }
+        assertEquals(full, repository.snapshot())
+    }
+
+    @Test
+    fun additiveRestoreConsumesSourceSoQuantityCannotBeAddedAgain() {
+        val fixture = fixture()
+        val target = repository.save(input(fixture).copy(quantity = 4))
+        val source = repository.save(input(fixture).copy(quantity = 6, note = "待还原来源"))
+        repository.voidRecord(source.id)
+        assertEquals(1, repository.restoreVoided(source.id, DuplicateMode.ADD_QUANTITY).processed)
+        val state = repository.snapshot()
+        assertEquals(target.id, state.records.single().id)
+        assertEquals(10, state.records.single().quantity)
+        assertTrue(state.changes.none { it.recordId == source.id })
+        assertTrue(state.changes.any { JSONObject(it.after).has("mergedSources") })
+        assertThrows(IllegalArgumentException::class.java) { repository.restoreVoided(source.id, DuplicateMode.ADD_QUANTITY) }
+        assertEquals(state, repository.snapshot())
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test
+    fun selectedPartsMergeChecksStateAndBatchVoidIsAtomic() {
+        val fixture = fixture()
+        val first = repository.save(input(fixture).copy(quantity = 4))
+        val second = repository.save(input(fixture).copy(quantity = 6))
+        val damaged = repository.save(input(fixture).copy(condition = "损坏"))
+        val before = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) { repository.mergeParts(setOf(first.id, damaged.id)) }
+        assertThrows(IllegalArgumentException::class.java) { repository.voidRecords(setOf(first.id, "missing")) }
+        assertEquals(before, repository.snapshot())
+        assertEquals(2, repository.mergeParts(setOf(first.id, second.id)).processed)
+        val merged = repository.snapshot().records.single { it.condition == "正常" }
+        assertEquals(10, merged.quantity)
+        assertEquals(2, repository.voidRecords(setOf(merged.id, damaged.id)))
+        assertEquals(0, repository.voidRecords(setOf(merged.id, damaged.id)))
+        assertEquals(0, repository.restore(repository.snapshot()))
+    }
+
+    @Test
+    fun warehouseMergeMovesArchivesAddsPartsAndKeepsBackupValid() {
+        val fixture = fixture()
+        val target = repository.addWarehouse(fixture.country.id, "目标仓")
+        repository.save(input(fixture).copy(warehouseId = target.id, quantity = 4))
+        repository.save(input(fixture).copy(quantity = 6, note = "来源仓备注"))
+        val archived = repository.save(input(fixture).copy(quantity = 2))
+        repository.voidRecord(archived.id)
+        repository.save(input(fixture, ItemKind.MACHINE, "AA-001"))
+        assertEquals(3, repository.mergeWarehouses(fixture.warehouse.id, target.id, DuplicateMode.ADD_QUANTITY).processed)
+        val state = repository.snapshot()
+        assertTrue(state.warehouses.none { it.id == fixture.warehouse.id })
+        assertTrue(state.records.all { it.warehouseId == target.id })
+        assertEquals(10, state.records.single { it.kind == ItemKind.PART && !it.voided }.quantity)
+        assertTrue(state.records.single { it.id == archived.id }.voided)
+        assertEquals(0, repository.restore(state))
+        val otherCountry = repository.addCountry("其他国")
+        val otherWarehouse = repository.addWarehouse(otherCountry.id, "其他国仓")
+        val before = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) { repository.mergeWarehouses(target.id, otherWarehouse.id, DuplicateMode.NEW_ENTRY) }
+        assertEquals(before, repository.snapshot())
+    }
+
+    @Test
+    fun deletingCountryAndWarehouseCleansOnlyTheirRecordsAndKeepsSurvivingHistoryValid() {
+        val fixture = fixture()
+        val otherCountry = repository.addCountry("其他国")
+        val otherWarehouse = repository.addWarehouse(otherCountry.id, "其他仓")
+        val moved = repository.save(input(fixture))
+        repository.save(input(fixture).copy(warehouseId = otherWarehouse.id), moved.id)
+        val removed = repository.save(input(fixture).copy(quantity = 2))
+        assertEquals(1, repository.deleteWarehouse(fixture.warehouse.id))
+        var state = repository.snapshot()
+        assertTrue(state.records.none { it.id == removed.id })
+        assertEquals(moved.id, state.records.single().id)
+        assertEquals(0, repository.restore(state))
+        assertEquals(0, repository.deleteCountry(fixture.country.id))
+        state = repository.snapshot()
+        assertEquals(0, repository.restore(state))
+        assertEquals(1, repository.deleteCountry(otherCountry.id))
+        assertTrue(repository.snapshot().records.isEmpty())
+        assertTrue(repository.snapshot().changes.isEmpty())
+    }
+
+    @Test
+    fun warehouseMergeAndRestoreNewEntryKeepSeparateRowsAndVoidedDuplicates() {
+        val fixture = fixture()
+        val target = repository.addWarehouse(fixture.country.id, "目标仓")
+        repository.save(input(fixture).copy(warehouseId = target.id, quantity = 4))
+        val source = repository.save(input(fixture).copy(quantity = 6))
+        val archived = repository.save(input(fixture).copy(quantity = 2))
+        repository.voidRecord(archived.id)
+        repository.mergeWarehouses(fixture.warehouse.id, target.id, DuplicateMode.NEW_ENTRY)
+        assertEquals(3, repository.snapshot().records.size)
+        assertEquals(10, repository.snapshot().records.filter { !it.voided }.sumOf { it.quantity })
+        assertEquals(1, repository.restoreVoided(archived.id, DuplicateMode.NEW_ENTRY).processed)
+        val state = repository.snapshot()
+        assertEquals(3, state.records.size)
+        assertTrue(state.records.all { !it.voided && it.warehouseId == target.id })
+        assertEquals(6, state.records.single { it.id == source.id }.quantity)
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test
+    fun bulkAddQuantityDoesNotFillNotesWithGeneratedQuantityMessages() {
+        val fixture = fixture()
+        val result = repository.importRecords(List(500) { input(fixture) }, DuplicateMode.ADD_QUANTITY)
+        assertEquals(500, result.processed)
+        val state = repository.snapshot()
+        assertEquals(500, state.records.single().quantity)
+        assertEquals("", state.records.single().note)
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test
+    fun missingBomPendingPartsStaySeparateEvenWhenAddQuantityIsSelected() {
+        val fixture = fixture()
+        val draft = input(fixture).copy(bom = "", condition = "待核查", note = "未知配件")
+        repository.importRecords(listOf(draft, draft.copy(note = "另一个未知配件")), DuplicateMode.ADD_QUANTITY)
+        val state = repository.snapshot()
+        assertEquals(2, state.records.size)
+        assertThrows(IllegalArgumentException::class.java) { repository.mergeParts(state.records.mapTo(mutableSetOf()) { it.id }) }
+        assertEquals(state, repository.snapshot())
     }
 
     private data class Fixture(val task: InventoryTask, val country: Country, val warehouse: Warehouse)
