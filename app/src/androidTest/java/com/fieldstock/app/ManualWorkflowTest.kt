@@ -2,6 +2,8 @@ package com.fieldstock.app
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -143,10 +145,10 @@ class ManualWorkflowTest {
         compose.waitUntil(10_000) { count() == 1 }
         awaitClearedReadyForm("BOM", "数量（件）")
         enter("BOM", "000123A"); enter("数量（件）", "5"); save()
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("核对后保存").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("核对后保存").assertIsDisplayed()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("相同配件如何入库？").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("相同配件如何入库？").assertIsDisplayed()
         assertEquals(1, count())
-        compose.onNodeWithText("确认保存").assertIsDisplayed().performClick()
+        compose.onNodeWithText("新增条目").assertIsDisplayed().performClick()
         compose.waitUntil(10_000) { count() == 2 }
         awaitClearedReadyForm("BOM", "数量（件）")
         assertEquals(15, records().sumOf { it.quantity })
@@ -165,7 +167,7 @@ class ManualWorkflowTest {
         compose.onAllNodesWithText("000123A").onFirst().assertIsDisplayed()
     }
 
-    @Test fun machineRejectsDuplicateAndAcceptsFifteenCharacterSn() {
+    @Test fun machineQuarantinesDuplicateAndAcceptsFifteenCharacterSn() {
         launchAndEnterWarehouse()
         compose.onNodeWithText("整机").assertIsDisplayed().performClick()
         capture("machine-form")
@@ -176,10 +178,14 @@ class ManualWorkflowTest {
         compose.waitUntil(10_000) { count() == 1 }
         awaitClearedReadyForm("BOM", "SN 前段", "SN 后段")
         enter("BOM", "000123A"); enter("SN 前段", "ABCDEFG"); enter("SN 后段", "1234567"); save()
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 已经录入").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("SN 已经录入").assertIsDisplayed()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("发现重复 SN").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("发现重复 SN").assertIsDisplayed()
         assertEquals(1, count())
-        val record = records().single()
+        compose.onNodeWithText("确认转入作废").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { count() == 2 && compose.onAllNodesWithText("重复 SN 已保留在作废页").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("重复 SN 已保留在作废页").assertIsDisplayed()
+        assertEquals(1, records().count { it.voided })
+        val record = records().single { !it.voided }
         assertEquals(ItemKind.MACHINE, record.kind)
         assertEquals("ABCDEFG-1234567", record.sn)
         assertEquals(1, record.quantity)
@@ -214,10 +220,12 @@ class ManualWorkflowTest {
         chooseVoidedRecords()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("还原").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("还原").assertIsDisplayed().performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 已存在，未还原").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("SN 已存在，未还原").assertIsDisplayed()
-        compose.onNodeWithText("保留作废").assertIsDisplayed().performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 已存在，未还原").fetchSemanticsNodes().isEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 已存在，保持作废").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("SN 已存在，保持作废").assertIsDisplayed()
+        compose.onNodeWithText("确认保留作废").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("重复 SN 已保留在作废页").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("知道了").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("重复 SN 已保留在作废页").fetchSemanticsNodes().isEmpty() }
         compose.onNodeWithText("OLD001").assertIsDisplayed()
         compose.onNodeWithText("还原").assertIsDisplayed()
         val after = records()
@@ -297,5 +305,133 @@ class ManualWorkflowTest {
         chooseVoidedRecords()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("CURVOID").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("CURVOID").assertIsDisplayed()
+    }
+
+    @Test fun choosingAddQuantityUpdatesExistingPartInsteadOfCreatingAnotherRow() {
+        val original = seed(ItemKind.PART, "ADD001", quantity = 10)
+        launchAndEnterWarehouse()
+        enter("BOM", "ADD001"); enter("数量（件）", "5"); save()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("添加到已有数量").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(10, records().single().quantity)
+        compose.onNodeWithText("添加到已有数量").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { records().singleOrNull()?.quantity == 15 }
+        awaitClearedReadyForm("BOM", "数量（件）")
+        assertEquals(original.id, records().single().id)
+    }
+
+    @Test fun multiSelectCanMergeMatchingPartsThenBatchVoidTheMergedRecord() {
+        seed(ItemKind.PART, "MERGE001", quantity = 3)
+        seed(ItemKind.PART, "MERGE001", quantity = 4)
+        launchAndEnterWarehouse()
+        openRecords()
+        compose.onAllNodesWithText("MERGE001").onFirst().performTouchInput { longClick() }
+        compose.onNodeWithText("全选").assertIsDisplayed().performClick()
+        compose.onNodeWithText("合并配件").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("确认合并").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("确认合并").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { count() == 1 && records().single().quantity == 7 }
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("多选").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("多选").assertIsDisplayed().performClick()
+        compose.onNodeWithText("全选").assertIsDisplayed().performClick()
+        compose.onNodeWithText("批量作废").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("确认批量作废").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("确认批量作废").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { records().single().voided }
+        assertEquals(7, records().single().quantity)
+    }
+
+    private fun openSettings() {
+        compose.onNodeWithText("设置").performClick()
+        compose.onNodeWithText("删除当前仓库").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun deletingWarehouseNamesTargetAndWaitsForSecondConfirmation() {
+        val removed = seed(ItemKind.PART, "REMOVE", quantity = 3, voided = true)
+        val other = InventoryRepository(context).use { it.addWarehouse(it.snapshot().countries.single().id, "保留仓").id }
+        val keep = seed(ItemKind.PART, "KEEP", warehouse = other)
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithText("删除当前仓库").performClick()
+        compose.onNodeWithText("国家：测试国", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("仓库：测试仓", substring = true).assertIsDisplayed()
+        assertEquals(2, count())
+        compose.onNodeWithText("继续删除").performClick()
+        compose.onNodeWithText("仓库：测试仓", substring = true).assertIsDisplayed()
+        assertEquals(2, count())
+        compose.onNodeWithText("确认删除仓库").performClick()
+        compose.waitUntil(10_000) { records().map { it.id } == listOf(keep.id) }
+        InventoryRepository(context).use {
+            assertTrue(it.snapshot().warehouses.none { w -> w.id == warehouseId })
+            assertTrue(it.snapshot().changes.none { log -> log.recordId == removed.id })
+        }
+    }
+
+    @Test fun deletingCountryRemovesAllItsWarehousesOnlyAfterTwoConfirmations() {
+        val second = InventoryRepository(context).use { it.addWarehouse(it.snapshot().countries.single().id, "测试二仓").id }
+        seed(ItemKind.PART, "FIRST"); seed(ItemKind.PART, "SECOND", warehouse = second, voided = true)
+        val other = InventoryRepository(context).use { it.addWarehouse(it.addCountry("保留国").id, "保留仓").id }
+        val keep = seed(ItemKind.PART, "KEEP", warehouse = other)
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithText("删除当前国家").performScrollTo().performClick()
+        compose.onNodeWithText("国家：测试国", substring = true).assertIsDisplayed()
+        assertEquals(3, count())
+        compose.onNodeWithText("继续删除").performClick()
+        compose.onNodeWithText("测试二仓", substring = true).assertIsDisplayed()
+        assertEquals(3, count())
+        compose.onNodeWithText("确认删除国家").performClick()
+        compose.waitUntil(10_000) { records().map { it.id } == listOf(keep.id) }
+        InventoryRepository(context).use { assertEquals(listOf("保留国"), it.snapshot().countries.map { country -> country.name }) }
+    }
+
+    @Test fun mergingWarehousesAddsMatchingPartsKeepsConditionsAndMovesArchivesAfterTwoConfirmations() {
+        val target = InventoryRepository(context).use { it.addWarehouse(it.snapshot().countries.single().id, "目标仓").id }
+        seed(ItemKind.PART, "SAME", quantity = 3)
+        seed(ItemKind.PART, "SAME", quantity = 2, condition = "损坏")
+        val archived = seed(ItemKind.MACHINE, "MODEL", "AA-001", voided = true)
+        seed(ItemKind.MACHINE, "MODEL", "AA-001", warehouse = target)
+        seed(ItemKind.PART, "SAME", quantity = 4, warehouse = target)
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithText("合并当前仓库").performScrollTo().performClick()
+        compose.onNodeWithText("选择目标仓库 ▾").performClick()
+        compose.onNodeWithText("目标仓").performClick()
+        compose.onNodeWithText("添加到已有数量").performScrollTo().performClick()
+        assertEquals(5, count())
+        compose.onNodeWithText("继续合并").performClick()
+        compose.onNodeWithText("源仓库：测试仓", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("目标仓库：目标仓", substring = true).assertIsDisplayed()
+        assertEquals(5, count())
+        compose.onNodeWithText("确认合并仓库").performClick()
+        compose.waitUntil(10_000) { count() == 4 && records().all { it.warehouseId == target } }
+        assertEquals(7, records().single { it.kind == ItemKind.PART && it.condition == "正常" }.quantity)
+        assertEquals(2, records().single { it.condition == "损坏" }.quantity)
+        assertTrue(records().single { it.id == archived.id }.voided)
+        InventoryRepository(context).use { assertEquals(0, it.restore(it.snapshot())) }
+    }
+
+    @Test fun csvImportUsesChosenCountryWarehouseAndQuarantinesBatchDuplicatesTogether() {
+        seed(ItemKind.MACHINE, "OLDMODEL", "AA-001")
+        val target = InventoryRepository(context).use { it.addWarehouse(it.addCountry("导入国").id, "导入仓").id }
+        val original = seed(ItemKind.PART, "000123A", quantity = 4, warehouse = target)
+        launchAndEnterWarehouse()
+        val csv = File(context.cacheDir, "test-import.csv").apply { writeText(
+            "\uFEFF类型,BOM,SN,数量,状态,备注\r\n配件,000123A,,3,正常,追加\r\n配件,000123A,,2,损坏,分开\r\n整机,MODEL,AA-001,1,正常,\r\n整机,MODEL,BB-002,1,正常,\r\n整机,MODEL,BB-002,1,正常,\r\n", Charsets.UTF_8) }
+        scenario!!.onActivity { ViewModelProvider(it)[InventoryViewModel::class.java].previewImport(Uri.fromFile(csv)) }
+        compose.onNodeWithText("处理").performClick()
+        compose.onNodeWithText("导入").performClick()
+        compose.onNodeWithText("测试国 ▾").performScrollTo().performClick()
+        compose.onNodeWithText("导入国").performClick()
+        compose.onNodeWithText("选择为导入目标").performScrollTo().performClick()
+        compose.onNodeWithText("导入目标：导入国 / 导入仓").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("添加到已有数量").performScrollTo().performClick()
+        compose.onNodeWithText("预览并确认导入").performScrollTo().performClick()
+        compose.onAllNodesWithText("目标：导入国 / 导入仓", substring = true).onLast().assertIsDisplayed()
+        assertEquals(2, count())
+        compose.onNodeWithText("确认导入").assertIsDisplayed().performClick()
+        compose.waitUntil(10_000) { count() == 6 && compose.onAllNodesWithText("重复 SN 已保留在作废页").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(2, records().count { it.voided })
+        assertEquals(7, records().single { it.id == original.id }.quantity)
+        assertTrue(records().filter { it.id != original.id && it.bom != "OLDMODEL" }.all { it.warehouseId == target })
+        compose.onNodeWithText("知道了").assertIsDisplayed().performClick()
+        compose.onNodeWithText("盘点").performClick()
+        compose.onNodeWithText("测试国 / 测试仓").assertIsDisplayed()
     }
 }

@@ -1,0 +1,7 @@
+2026-10-12 JVM / Robolectric: PASS
+com.fieldstock.app.data.InventoryRepositoryTest: tests=37, failures=0, errors=0
+com.fieldstock.app.export.InventoryFilesTest: tests=9, failures=0, errors=0
+com.fieldstock.app.importdata.InventoryImportTest: tests=10, failures=0, errors=0
+com.fieldstock.app.model.IdentifierRulesTest: tests=2, failures=0, errors=0
+com.fieldstock.app.scan.OcrCandidatesTest: tests=14, failures=0, errors=0
+TOTAL: 72 tests, 0 failures, 0 errors

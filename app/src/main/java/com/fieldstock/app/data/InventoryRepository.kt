@@ -8,14 +8,17 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.fieldstock.app.model.ChangeLog
 import com.fieldstock.app.model.Country
 import com.fieldstock.app.model.DuplicateSnException
+import com.fieldstock.app.model.DuplicateMode
 import com.fieldstock.app.model.IdentifierRules
 import com.fieldstock.app.model.InventorySnapshot
 import com.fieldstock.app.model.InventoryTask
 import com.fieldstock.app.model.ItemKind
+import com.fieldstock.app.model.MutationResult
 import com.fieldstock.app.model.RecordInput
 import com.fieldstock.app.model.StockRecord
 import com.fieldstock.app.model.Warehouse
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.Locale
 import java.util.UUID
 
@@ -156,19 +159,120 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     /** Restore the original state and quantity; an occupied serial leaves this record voided. */
     @Synchronized
-    fun restoreVoided(id: String): StockRecord = transaction { db ->
+    fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY): MutationResult = transaction { db ->
         val previous = findRecord(db, id) ?: throw IllegalArgumentException("记录不存在")
         require(previous.voided) { "只能还原已作废的记录" }
         if (previous.kind == ItemKind.MACHINE && previous.sn.isNotEmpty()) {
-            activeDuplicate(db, previous.sn, id)?.let {
-                throw DuplicateSnException(it, "还原失败，SN 已存在于未作废整机记录：${previous.sn}")
+            if (activeDuplicate(db, previous.sn, id) != null) {
+                return@transaction MutationResult(0, listOf(previous))
+            }
+        }
+        if (previous.kind == ItemKind.PART && mode == DuplicateMode.ADD_QUANTITY) {
+            earliestPart(db, previous)?.let { target ->
+                combineParts(db, target, listOf(previous), consumeSources = true)
+                return@transaction MutationResult(1)
             }
         }
         val now = maxOf(System.currentTimeMillis(), previous.updatedAt)
         val restored = previous.copy(voided = false, updatedAt = now)
         db.update("records", recordValues(restored), "id = ?", arrayOf(id))
         insertChange(db, ChangeLog(newId(), id, "RESTORE", recordJson(previous), recordJson(restored), now))
-        restored
+        MutationResult(1)
+    }
+
+    @Synchronized
+    fun saveIncoming(input: RecordInput, mode: DuplicateMode): MutationResult = transaction { db ->
+        incoming(db, input, mode)
+    }
+
+    @Synchronized
+    fun importRecords(inputs: List<RecordInput>, mode: DuplicateMode): MutationResult = transaction { db ->
+        val duplicates = mutableListOf<StockRecord>()
+        inputs.forEach { duplicates += incoming(db, it, mode).duplicateMachines }
+        MutationResult(inputs.size, duplicates)
+    }
+
+    @Synchronized
+    fun voidRecords(ids: Set<String>): Int = transaction { db ->
+        val records = ids.map { findRecord(db, it) ?: throw IllegalArgumentException("记录不存在") }
+        val active = records.filter { !it.voided }
+        active.forEach { before ->
+            val now = maxOf(System.currentTimeMillis(), before.updatedAt)
+            val after = before.copy(voided = true, updatedAt = now)
+            db.update("records", recordValues(after), "id = ?", arrayOf(before.id))
+            insertChange(db, ChangeLog(newId(), before.id, "VOID", recordJson(before), recordJson(after), now))
+        }
+        active.size
+    }
+
+    @Synchronized
+    fun mergeParts(ids: Set<String>): MutationResult = transaction { db ->
+        require(ids.size >= 2) { "至少选择两条配件记录" }
+        val selected = ids.map { findRecord(db, it) ?: throw IllegalArgumentException("记录不存在") }
+            .sortedWith(compareBy<StockRecord> { it.createdAt }.thenBy { it.id })
+        val target = selected.first()
+        require(target.bom.isNotEmpty()) { "缺少 BOM 的待核查配件不能合并" }
+        require(selected.all { it.kind == ItemKind.PART && !it.voided && it.warehouseId == target.warehouseId &&
+            it.bom == target.bom && it.condition == target.condition }) { "只能合并同仓库、同 BOM、同状态的未作废配件" }
+        combineParts(db, target, selected.drop(1), consumeSources = true)
+        MutationResult(selected.size)
+    }
+
+    @Synchronized
+    fun deleteWarehouse(id: String): Int = transaction { db ->
+        require(exists(db, "warehouses", "id = ?", arrayOf(id))) { "仓库不存在" }
+        db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id = ?)", arrayOf(id))
+        val count = db.delete("records", "warehouse_id = ?", arrayOf(id))
+        rewriteAuditWarehouses(db, setOf(id))
+        db.delete("warehouses", "id = ?", arrayOf(id))
+        count
+    }
+
+    @Synchronized
+    fun deleteCountry(id: String): Int = transaction { db ->
+        require(exists(db, "countries", "id = ?", arrayOf(id))) { "国家不存在" }
+        val warehouses = db.query("warehouses", arrayOf("id"), "country_id = ?", arrayOf(id), null, null, null).use { cursor ->
+            buildSet { while (cursor.moveToNext()) add(cursor.string("id")) }
+        }
+        db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id IN (SELECT id FROM warehouses WHERE country_id = ?))", arrayOf(id))
+        val count = db.delete("records", "warehouse_id IN (SELECT id FROM warehouses WHERE country_id = ?)", arrayOf(id))
+        rewriteAuditWarehouses(db, warehouses)
+        db.delete("warehouses", "country_id = ?", arrayOf(id))
+        db.delete("countries", "id = ?", arrayOf(id))
+        count
+    }
+
+    @Synchronized
+    fun mergeWarehouses(sourceId: String, targetId: String, mode: DuplicateMode): MutationResult = transaction { db ->
+        require(sourceId != targetId) { "来源与目标仓库不能相同" }
+        fun countryOf(id: String): String = db.query("warehouses", arrayOf("country_id"), "id = ?", arrayOf(id), null, null, null).use {
+            require(it.moveToFirst()) { "仓库不存在" }; it.string("country_id")
+        }
+        require(countryOf(sourceId) == countryOf(targetId)) { "只能合并同一国家的仓库" }
+        val sources = db.query("records", null, "warehouse_id = ?", arrayOf(sourceId), null, null, "created_at ASC, id ASC").use { cursor ->
+            buildList { while (cursor.moveToNext()) add(readRecord(cursor)) }
+        }
+        val duplicates = mutableListOf<StockRecord>()
+        sources.forEach { before ->
+            val moved = before.copy(warehouseId = targetId)
+            if (before.kind == ItemKind.PART && !before.voided && mode == DuplicateMode.ADD_QUANTITY) {
+                val target = earliestPart(db, moved)
+                if (target != null) {
+                    combineParts(db, target, listOf(before), consumeSources = true)
+                    return@forEach
+                }
+            }
+            val duplicate = before.kind == ItemKind.MACHINE && !before.voided && before.sn.isNotEmpty() &&
+                activeDuplicate(db, before.sn, before.id) != null
+            val now = maxOf(System.currentTimeMillis(), before.updatedAt)
+            val after = moved.copy(voided = before.voided || duplicate, updatedAt = now)
+            db.update("records", recordValues(after), "id = ?", arrayOf(before.id))
+            insertChange(db, ChangeLog(newId(), before.id, if (duplicate) "VOID" else "UPDATE", recordJson(before), recordJson(after), now))
+            if (duplicate) duplicates += after
+        }
+        rewriteAuditWarehouses(db, setOf(sourceId), targetId)
+        db.delete("warehouses", "id = ?", arrayOf(sourceId))
+        MutationResult(sources.size, duplicates)
     }
 
     /** Permanently remove one voided record and its associated change history. */
@@ -223,8 +327,31 @@ class InventoryRepository(context: Context) : AutoCloseable {
         val tasks = mergeById("盘点任务", current.tasks, snapshot.tasks, InventoryTask::id)
         val countries = mergeById("国家", current.countries, snapshot.countries, Country::id)
         val warehouses = mergeById("仓库", current.warehouses, snapshot.warehouses, Warehouse::id)
-        val records = mergeById("库存记录", current.records, snapshot.records, StockRecord::id)
-        val changes = mergeById("修改历史", current.changes, snapshot.changes, ChangeLog::id)
+        val currentIds = current.records.mapTo(mutableSetOf()) { it.id }
+        val occupied = current.records.filter { it.kind == ItemKind.MACHINE && !it.voided && it.sn.isNotEmpty() }
+            .associateByTo(mutableMapOf()) { it.sn }
+        val duplicateAudits = mutableListOf<ChangeLog>()
+        val incomingRecords = snapshot.records.map { record ->
+            if (record.id !in currentIds && record.kind == ItemKind.MACHINE && !record.voided && record.sn.isNotEmpty()) {
+                if (occupied.containsKey(record.sn)) {
+                    val now = maxOf(System.currentTimeMillis(), record.updatedAt)
+                    val voided = record.copy(voided = true, updatedAt = now)
+                    duplicateAudits += ChangeLog(newId(), record.id, "VOID", recordJson(record),
+                        JSONObject(recordJson(voided)).put("reason", "duplicate_backup_import").toString(), now)
+                    voided
+                } else { occupied[record.sn] = record; record }
+            } else record
+        }
+        val records = mergeById("库存记录", current.records, incomingRecords, StockRecord::id) { existing, incoming ->
+            existing == incoming || current.changes.any { log ->
+                log.recordId == incoming.id && log.action == "VOID" && runCatching {
+                    val after = JSONObject(log.after)
+                    after.optString("reason") == "duplicate_backup_import" &&
+                        recordFromJson(JSONObject(log.before)) == incoming && recordFromJson(after) == existing
+                }.getOrDefault(false)
+            }
+        }
+        val changes = mergeById("修改历史", current.changes, snapshot.changes + duplicateAudits, ChangeLog::id)
 
         tasks.values.forEach {
             validateId(it.id)
@@ -271,14 +398,94 @@ class InventoryRepository(context: Context) : AutoCloseable {
         snapshot.tasks.filter { it.id !in taskIds }.forEach { insertTask(db, it) }
         snapshot.countries.filter { it.id !in countryIds }.forEach { insertCountry(db, it) }
         snapshot.warehouses.filter { it.id !in warehouseIds }.forEach { insertWarehouse(db, it) }
-        val imported = snapshot.records.filter { it.id !in recordIds }
+        val imported = incomingRecords.filter { it.id !in recordIds }
         imported.forEach { insertRecord(db, it) }
-        snapshot.changes.filter { it.id !in changeIds }.forEach { insertChange(db, it) }
+        (snapshot.changes + duplicateAudits).filter { it.id !in changeIds }.forEach { insertChange(db, it) }
         imported.size
     }
 
     @Synchronized
     override fun close() = helper.close()
+
+    private fun incoming(db: SQLiteDatabase, input: RecordInput, mode: DuplicateMode): MutationResult {
+        val now = System.currentTimeMillis()
+        var record = StockRecord(newId(), input.taskId, input.warehouseId, input.kind,
+            input.bom.trim(), if (input.kind == ItemKind.MACHINE) input.sn.trim() else "",
+            if (input.kind == ItemKind.MACHINE) 1 else input.quantity, input.condition.trim(), input.note.trim(), input.location.trim(),
+            input.sourceBom, input.sourceSn, input.rawBom, input.rawSn, now, now, false)
+        validateRecord(record)
+        require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { "兼容记录分组不存在" }
+        require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { "仓库不存在" }
+        if (record.kind == ItemKind.PART && mode == DuplicateMode.ADD_QUANTITY) {
+            earliestPart(db, record)?.let { target ->
+                combineParts(db, target, listOf(record), consumeSources = false)
+                return MutationResult(1)
+            }
+        }
+        val duplicate = record.kind == ItemKind.MACHINE && record.sn.isNotEmpty() && activeDuplicate(db, record.sn, record.id) != null
+        if (duplicate) record = record.copy(voided = true)
+        insertRecord(db, record)
+        insertChange(db, ChangeLog(newId(), record.id, "CREATE", "{}", recordJson(record), now))
+        return MutationResult(1, if (duplicate) listOf(record) else emptyList())
+    }
+
+    private fun earliestPart(db: SQLiteDatabase, source: StockRecord): StockRecord? {
+        if (source.bom.isEmpty()) return null
+        return db.query("records", null, "warehouse_id = ? AND bom = ? AND condition = ? AND kind = ? AND voided = 0 AND id != ?",
+            arrayOf(source.warehouseId, source.bom, source.condition, ItemKind.PART.name, source.id),
+            null, null, "created_at ASC, id ASC", "1").use { if (it.moveToFirst()) readRecord(it) else null }
+    }
+
+    private fun combineParts(db: SQLiteDatabase, target: StockRecord, sources: List<StockRecord>, consumeSources: Boolean) {
+        val quantity = target.quantity.toLong() + sources.sumOf { it.quantity.toLong() }
+        require(quantity in 1..MAX_QUANTITY.toLong()) { "合并数量超过 $MAX_QUANTITY，未修改任何记录" }
+        val details = sources.filter { it.location.isNotEmpty() || it.note.isNotEmpty() }.map { source ->
+            "合并来源 ${source.quantity} 件" + (if (source.location.isNotEmpty()) "，库位 ${source.location}" else "") +
+                (if (source.note.isNotEmpty()) "：${source.note}" else "")
+        }
+        val now = maxOf(System.currentTimeMillis(), target.updatedAt, sources.maxOf { it.updatedAt })
+        val after = target.copy(quantity = quantity.toInt(), note = (listOf(target.note).filter { it.isNotEmpty() } + details).joinToString("\n"), updatedAt = now)
+        validateRecord(after)
+        db.update("records", recordValues(after), "id = ?", arrayOf(target.id))
+        val auditAfter = JSONObject(recordJson(after)).put("mergedSources", JSONArray().apply {
+            sources.forEach { put(JSONObject(recordJson(it))) }
+        }).toString()
+        require(auditAfter.length <= 65536) { "合并来源过多，请分批合并" }
+        insertChange(db, ChangeLog(newId(), target.id, "UPDATE", recordJson(target), auditAfter, now))
+        if (consumeSources) sources.forEach {
+            db.delete("changes", "record_id = ?", arrayOf(it.id))
+            db.delete("records", "id = ?", arrayOf(it.id))
+        }
+    }
+
+    /** Historical identifiers remain archived as originalWarehouseId when their live warehouse is removed. */
+    private fun rewriteAuditWarehouses(db: SQLiteDatabase, removed: Set<String>, replacement: String? = null) {
+        if (removed.isEmpty()) return
+        val records = rows(db, "records", "id ASC", ::readRecord).associateBy { it.id }
+        val changes = rows(db, "changes", "id ASC") {
+            ChangeLog(it.string("id"), it.string("record_id"), it.string("action"), it.string("before_json"), it.string("after_json"), it.long("at"))
+        }
+        fun rewrite(value: Any?, target: String) {
+            when (value) {
+                is JSONObject -> {
+                    if (value.optString("warehouseId") in removed) {
+                        if (!value.has("originalWarehouseId")) value.put("originalWarehouseId", value.getString("warehouseId"))
+                        value.put("warehouseId", target)
+                    }
+                    value.keys().asSequence().toList().forEach { rewrite(value.opt(it), target) }
+                }
+                is JSONArray -> for (i in 0 until value.length()) rewrite(value.opt(i), target)
+            }
+        }
+        changes.forEach { change ->
+            val target = replacement ?: records.getValue(change.recordId).warehouseId
+            val before = JSONObject(change.before); val after = JSONObject(change.after)
+            rewrite(before, target); rewrite(after, target)
+            db.update("changes", ContentValues().apply {
+                put("before_json", before.toString()); put("after_json", after.toString())
+            }, "id = ?", arrayOf(change.id))
+        }
+    }
 
     private fun <T> transaction(block: (SQLiteDatabase) -> T): T {
         val db = helper.writableDatabase
@@ -469,7 +676,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
         })
     }
 
-    private fun <T> mergeById(label: String, current: List<T>, incoming: List<T>, id: (T) -> String): Map<String, T> {
+    private fun <T> mergeById(label: String, current: List<T>, incoming: List<T>, id: (T) -> String,
+        equivalent: (T, T) -> Boolean = { existing, item -> existing == item }): Map<String, T> {
         val combined = current.associateByTo(linkedMapOf(), id)
         val incomingIds = mutableSetOf<String>()
         incoming.forEach { item ->
@@ -477,8 +685,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
             validateId(itemId)
             require(incomingIds.add(itemId)) { "备份中的$label ID 重复：$itemId" }
             val existing = combined[itemId]
-            require(existing == null || existing == item) { "$label ID 已存在但内容不同，未导入：$itemId" }
-            combined[itemId] = item
+            require(existing == null || equivalent(existing, item)) { "$label ID 已存在但内容不同，未导入：$itemId" }
+            combined[itemId] = existing ?: item
         }
         return combined
     }
@@ -594,7 +802,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         private const val MIGRATION_NOTICE_KEY = "migration_voided_duplicates"
         private const val MAX_QUANTITY = 1_000_000_000
         private val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-        private val SOURCES = setOf("manual", "ocr")
+        private val SOURCES = setOf("manual", "ocr", "import")
         private val CONDITIONS = setOf("正常", "损坏", "待核查")
     }
 }

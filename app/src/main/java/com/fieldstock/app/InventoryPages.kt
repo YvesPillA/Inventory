@@ -1,6 +1,8 @@
 package com.fieldstock.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,7 +30,7 @@ internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit,
             .verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Text("选择盘点仓库", fontSize = 20.sp, fontWeight = FontWeight.Medium)
             Text("先选国家和仓库，再开始盘点。", color = Color(0xFF526775), fontSize = 14.sp)
-            WarehousePicker(vm, "进入仓库", onEnter)
+            WarehousePicker(vm, "进入仓库", onEnter = onEnter)
             TextButton(onClick = onRestore, enabled = !vm.busy) { Text("从备份恢复") }
             vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -38,7 +40,7 @@ internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit,
 }
 
 @Composable
-private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, onEnter: (String) -> Unit) {
+private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, allowCreate: Boolean = true, onEnter: (String) -> Unit) {
     var countryId by rememberSaveable { mutableStateOf("") }
     var warehouseId by rememberSaveable { mutableStateOf("") }
     var countryMenu by remember { mutableStateOf(false) }
@@ -66,7 +68,7 @@ private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, onEnter:
                     vm.snapshot.countries.forEach { country -> DropdownMenuItem(text = { Text(country.name) }, onClick = { countryId = country.id; warehouseId = ""; countryMenu = false }) }
                 }
             }
-            TextButton(onClick = { name = ""; adding = "country" }, enabled = !vm.busy) { Text("新建国家") }
+            if (allowCreate) TextButton(onClick = { name = ""; adding = "country" }, enabled = !vm.busy) { Text("新建国家") }
         }
         Text("仓库", color = Petrol, fontSize = 14.sp)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -79,7 +81,7 @@ private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, onEnter:
                     warehouses.forEach { warehouse -> DropdownMenuItem(text = { Text(warehouse.name) }, onClick = { warehouseId = warehouse.id; warehouseMenu = false }) }
                 }
             }
-            TextButton(onClick = { name = ""; adding = "warehouse" }, enabled = countryId.isNotEmpty() && !vm.busy) { Text("新建仓库") }
+            if (allowCreate) TextButton(onClick = { name = ""; adding = "warehouse" }, enabled = countryId.isNotEmpty() && !vm.busy) { Text("新建仓库") }
         }
         Button(onClick = { onEnter(warehouseId) }, enabled = warehouses.any { it.id == warehouseId } && !vm.busy,
             modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(enterLabel, fontSize = 17.sp) }
@@ -99,23 +101,34 @@ private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, onEnter:
 }
 
 @Composable
-internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit) {
+internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit, onStructureChanged: () -> Unit = {}) {
     var rename by remember { mutableStateOf<Pair<String, String>?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
+    var deleting by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var deleteStep by remember { mutableIntStateOf(0) }
+    var merging by remember { mutableStateOf(false) }
+    var mergeTarget by remember { mutableStateOf("") }
+    var mergeMenu by remember { mutableStateOf(false) }
+    var mergeStep by remember { mutableIntStateOf(0) }
+    var mergeMode by remember { mutableStateOf(DuplicateMode.NEW_ENTRY) }
+    val warehouse = vm.snapshot.warehouses.find { it.id == vm.warehouseId }
+    val country = vm.snapshot.countries.find { it.id == warehouse?.countryId }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("设置", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text("切换或创建国家和仓库", style = MaterialTheme.typography.titleMedium)
-        WarehousePicker(vm, "切换到此仓库", onChoose)
+        WarehousePicker(vm, "切换到此仓库", onEnter = onChoose)
         HorizontalDivider()
         Text("修改当前名称", style = MaterialTheme.typography.titleMedium)
-        val warehouse = vm.snapshot.warehouses.find { it.id == vm.warehouseId }
-        val country = vm.snapshot.countries.find { it.id == warehouse?.countryId }
         TextButton(onClick = { country?.let { rename = "country" to it.id; name = it.name } }, enabled = country != null && !vm.busy) { Text("修改当前国家名称") }
         TextButton(onClick = { warehouse?.let { rename = "warehouse" to it.id; name = it.name } }, enabled = warehouse != null && !vm.busy) { Text("修改当前仓库名称") }
+        TextButton(onClick = { deleting = "warehouse" to warehouse!!.id; deleteStep = 0 }, enabled = warehouse != null && !vm.busy) { Text("删除当前仓库", color = MaterialTheme.colorScheme.error) }
+        TextButton(onClick = { deleting = "country" to country!!.id; deleteStep = 0 }, enabled = country != null && !vm.busy) { Text("删除当前国家", color = MaterialTheme.colorScheme.error) }
+        OutlinedButton(onClick = { merging = true; mergeTarget = ""; mergeStep = 0 }, enabled = warehouse != null && vm.snapshot.warehouses.any { it.countryId == warehouse.countryId && it.id != warehouse.id } && !vm.busy,
+            modifier = Modifier.fillMaxWidth()) { Text("合并当前仓库") }
         HorizontalDivider()
         OutlinedButton(onClick = onRestore, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text("从备份合并恢复") }
         Text("BOM：字母数字最多14位。\nSN：两段字母数字合计最多14位，横线自动补齐。\n前导零和大小写保留，SN在所有仓库中唯一。", fontSize = 14.sp, color = Color(0xFF526775))
-        Text("盘库助手 0.2.0 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
+        Text("盘库助手 0.2.1 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
     }
     rename?.let { request -> AlertDialog(onDismissRequest = { rename = null }, title = { Text("修改名称") },
@@ -124,14 +137,55 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
             if (request.first == "country") it.renameCountry(request.second, name) else it.renameWarehouse(request.second, name)
         } }, enabled = name.isNotBlank() && !vm.busy) { Text("保存名称") } },
         dismissButton = { TextButton(onClick = { rename = null }) { Text("取消") } }) }
+    deleting?.let { request ->
+        val ids = if (request.first == "country") vm.snapshot.warehouses.filter { it.countryId == request.second }.map { it.id }.toSet() else setOf(request.second)
+        val countryName = if (request.first == "country") vm.snapshot.countries.find { it.id == request.second }?.name.orEmpty() else country?.name.orEmpty()
+        val warehouseNames = vm.snapshot.warehouses.filter { it.id in ids }.joinToString("、") { it.name }.ifEmpty { "无仓库" }
+        val count = vm.snapshot.records.count { it.warehouseId in ids }
+        ConfirmDialog(if (deleteStep == 0) "删除${if (request.first == "country") "国家" else "仓库"}？" else "再次确认删除",
+            "国家：$countryName\n仓库：$warehouseNames\n将永久删除 $count 条记录（含作废）及修改历史，并删除${if (request.first == "country") "这个国家及其全部仓库" else "这个仓库"}。",
+            if (deleteStep == 0) "继续删除" else if (request.first == "country") "确认删除国家" else "确认删除仓库", { deleting = null; deleteStep = 0 }) {
+            if (deleteStep == 0) deleteStep = 1 else vm.perform("已删除", after = { deleting = null; deleteStep = 0; onStructureChanged() }) {
+                if (request.first == "country") it.deleteCountry(request.second) else it.deleteWarehouse(request.second)
+            }
+        }
+    }
+    if (merging && warehouse != null) {
+        val targets = vm.snapshot.warehouses.filter { it.countryId == warehouse.countryId && it.id != warehouse.id }
+        val target = targets.find { it.id == mergeTarget }
+        val sourceCount = vm.snapshot.records.count { it.warehouseId == warehouse.id }
+        val targetCount = vm.snapshot.records.count { it.warehouseId == mergeTarget }
+        val summary = "国家：${country?.name}\n源仓库：${warehouse.name}（$sourceCount 条）\n目标仓库：${target?.name ?: "请选择"}（$targetCount 条）\n合并后删除源仓库，作废记录随同迁移。"
+        AlertDialog(onDismissRequest = { merging = false }, title = { Text(if (mergeStep == 0) "合并仓库" else "再次确认合并仓库") }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(summary)
+                if (mergeStep == 0) {
+                    Box {
+                        OutlinedButton(onClick = { mergeMenu = true }, modifier = Modifier.fillMaxWidth()) { Text("${target?.name ?: "选择目标仓库"} ▾") }
+                        DropdownMenu(mergeMenu, { mergeMenu = false }) { targets.forEach { option -> DropdownMenuItem(text = { Text(option.name) }, onClick = { mergeTarget = option.id; mergeMenu = false }) } }
+                    }
+                    DuplicateModePicker(mergeMode) { mergeMode = it }
+                } else Text(if (mergeMode == DuplicateMode.ADD_QUANTITY) "同 BOM、同状态配件添加到已有数量。" else "同 BOM、同状态配件保留为新增条目。")
+            }
+        }, confirmButton = { TextButton(onClick = {
+            if (mergeStep == 0) mergeStep = 1 else {
+                val source = warehouse.id; val destination = mergeTarget
+                vm.performMutation("仓库已合并", after = { merging = false; onStructureChanged(); onChoose(destination) }) { it.mergeWarehouses(source, destination, mergeMode) }
+            }
+        }, enabled = target != null && !vm.busy) { Text(if (mergeStep == 0) "继续合并" else "确认合并仓库") } }, dismissButton = { TextButton(onClick = { merging = false }) { Text("取消") } })
+    }
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, onVoid: (StockRecord) -> Unit,
     onRestore: (StockRecord) -> Unit, onDelete: (StockRecord) -> Unit, onClear: (String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var category by rememberSaveable { mutableStateOf("active") }
     var filter by rememberSaveable { mutableStateOf("全部") }
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(emptySet<String>()) }
+    var batchAction by remember { mutableStateOf<String?>(null) }
     val voided = category == "voided"
     val categoryRecords = vm.snapshot.records.filter { it.warehouseId == vm.warehouseId && it.voided == voided }
     val records = categoryRecords.filter {
@@ -139,15 +193,26 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
             (query.isBlank() || it.bom.contains(query.trim(), true) || it.sn.contains(query.trim(), true) || it.note.contains(query.trim(), true))
     }.sortedByDescending { it.updatedAt }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        ChoiceRow(listOf("active" to "正常", "voided" to "作废"), category, !vm.busy) { category = it }
+        ChoiceRow(listOf("active" to "正常", "voided" to "作废"), category, !vm.busy) { category = it; selecting = false; selected = emptySet() }
         OutlinedTextField(query, { query = it }, label = { Text("搜索 BOM、SN 或备注") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("全部", "配件", "整机", "待核查").forEach { title -> FilterChip(filter == title, { filter = title }, label = { Text(title, fontSize = 12.sp) }) }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("${records.size} / ${categoryRecords.size} 条", Modifier.weight(1f), fontSize = 12.sp, color = Petrol)
+            if (!voided) TextButton(onClick = { selecting = !selecting; selected = emptySet() }, enabled = !vm.busy) { Text(if (selecting) "取消多选" else "多选") }
             TextButton(onClick = { onClear(category) }, enabled = categoryRecords.isNotEmpty() && !vm.busy) {
                 Text(if (voided) "一键清除作废" else "一键清空正常", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+            }
+        }
+        if (selecting && !voided) {
+            val picked = categoryRecords.filter { it.id in selected }
+            val canMerge = picked.size >= 2 && picked.all { it.kind == ItemKind.PART && it.bom.isNotEmpty() } && picked.map { it.bom to it.condition }.distinct().size == 1
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selected = records.map { it.id }.toSet() }) { Text("全选") }
+                Text("已选 ${selected.size}", Modifier.weight(1f), fontSize = 12.sp)
+                TextButton(onClick = { batchAction = "void" }, enabled = selected.isNotEmpty() && !vm.busy) { Text("批量作废") }
+                TextButton(onClick = { batchAction = "merge" }, enabled = canMerge && !vm.busy) { Text("合并配件") }
             }
         }
         if (!voided) Text("包含正常、损坏和待核查；作废记录另页查看。", fontSize = 11.sp, color = Color.Gray)
@@ -156,8 +221,10 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
             if (records.isEmpty()) item { Text(if (voided) "没有作废记录。" else "没有符合条件的记录。", color = Color.Gray, modifier = Modifier.padding(vertical = 20.dp)) }
             items(records, key = { it.id }) { record ->
                 Surface(color = if (voided) Color(0xFFE9EEF1) else Color.White, shape = MaterialTheme.shapes.small) {
-                    Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Column(Modifier.fillMaxWidth().combinedClickable(onClick = { if (selecting) selected = if (record.id in selected) selected - record.id else selected + record.id },
+                        onLongClick = { if (!voided) { selecting = true; selected = selected + record.id } }).padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            if (selecting) Checkbox(record.id in selected, { checked -> selected = if (checked) selected + record.id else selected - record.id }, enabled = !vm.busy)
                             Text(if (record.kind == ItemKind.PART) "配件 · ${record.quantity} 件" else "整机 · 1 台", fontWeight = FontWeight.Medium)
                             Text(if (voided) "已作废" else record.condition, color = if (record.condition == "正常" && !voided) Teal else Amber, fontSize = 12.sp)
                         }
@@ -165,7 +232,7 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
                         if (record.kind == ItemKind.MACHINE) Text(record.sn.ifEmpty { "SN 待核查" }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
                         if (record.note.isNotEmpty()) Text(record.note, fontSize = 13.sp)
                         Text(InventoryViewModel.formatTime(record.updatedAt), fontSize = 11.sp, color = Color.Gray)
-                        Row {
+                        if (!selecting) Row {
                             if (voided) {
                                 TextButton(onClick = { onRestore(record) }, enabled = !vm.busy) { Text("还原") }
                                 TextButton(onClick = { onDelete(record) }, enabled = !vm.busy) { Text("删除", color = MaterialTheme.colorScheme.error) }
@@ -178,6 +245,62 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
                 }
             }
         }
+    }
+    batchAction?.let { action ->
+        val picked = categoryRecords.filter { it.id in selected }
+        ConfirmDialog(if (action == "void") "作废所选记录？" else "合并所选配件？",
+            "${vm.warehouseLabel(vm.warehouseId)}\n共 ${picked.size} 条${if (action == "merge") "，BOM：${picked.firstOrNull()?.bom}，状态：${picked.firstOrNull()?.condition}，合计 ${picked.sumOf { it.quantity.toLong() }} 件" else "，作废后不再计数，可以还原"}。",
+            if (action == "void") "确认批量作废" else "确认合并", { batchAction = null }) {
+            val ids = selected; batchAction = null
+            vm.perform(if (action == "void") "所选记录已作废" else "所选配件已合并", after = { selected = emptySet(); selecting = false }) {
+                if (action == "void") it.voidRecords(ids) else it.mergeParts(ids)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun DuplicateModePicker(mode: DuplicateMode, onSelect: (DuplicateMode) -> Unit) {
+    Column {
+        Text("同 BOM、同状态配件的处理方式", fontSize = 13.sp, color = Petrol)
+        listOf(DuplicateMode.ADD_QUANTITY to "添加到已有数量", DuplicateMode.NEW_ENTRY to "新增条目").forEach { (value, label) ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = mode == value, onClick = { onSelect(value) })
+                TextButton(onClick = { onSelect(value) }) { Text(label) }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, onImport: () -> Unit, onTemplate: () -> Unit) {
+    var section by rememberSaveable { mutableStateOf("export") }
+    var targetWarehouse by rememberSaveable { mutableStateOf(vm.warehouseId) }
+    var mode by remember { mutableStateOf(DuplicateMode.NEW_ENTRY) }
+    var confirm by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ChoiceRow(listOf("import" to "导入", "export" to "导出"), section, !vm.busy) { section = it } }
+        Box(Modifier.weight(1f)) {
+            if (section == "export") ExportPage(vm, onExport)
+            else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("导入库存文件", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("使用 CSV 模板，BOM、SN 按文本填写以保留前导零。导入目标独立选择，不改变当前盘点仓库。", fontSize = 14.sp, color = Petrol)
+                OutlinedButton(onClick = onTemplate, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下载导入模板") }
+                Button(onClick = onImport, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择 CSV 文件") }
+                WarehousePicker(vm, "选择为导入目标", allowCreate = false) { targetWarehouse = it }
+                Text("导入目标：${vm.warehouseLabel(targetWarehouse)}", fontWeight = FontWeight.Medium)
+                DuplicateModePicker(mode) { mode = it }
+                vm.importRows?.let { rows ->
+                    Text("已读取 ${rows.size} 行，确认后导入所选仓库。", color = Teal)
+                    Button(onClick = { confirm = true }, enabled = rows.isNotEmpty() && vm.snapshot.warehouses.any { it.id == targetWarehouse } && !vm.busy,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("预览并确认导入") }
+                }
+                vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
+            }
+        }
+    }
+    if (confirm) ConfirmDialog("确认导入到此仓库？", "目标：${vm.warehouseLabel(targetWarehouse)}\n共 ${vm.importRows?.size ?: 0} 行。\n${if (mode == DuplicateMode.ADD_QUANTITY) "同 BOM、同状态配件添加到已有数量" else "配件新增条目"}。\n${vm.importDuplicateNotice()}\n重复 SN 整机将统一放入作废页，已有正常记录保持。", "确认导入", { confirm = false }) {
+        confirm = false; vm.applyImport(targetWarehouse, mode)
     }
 }
 

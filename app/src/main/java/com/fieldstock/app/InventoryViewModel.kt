@@ -2,6 +2,7 @@ package com.fieldstock.app
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -10,6 +11,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.importdata.ImportRow
+import com.fieldstock.app.importdata.InventoryImport
 import com.fieldstock.app.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -37,6 +40,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var error by mutableStateOf<String?>(null)
     var duplicate by mutableStateOf<StockRecord?>(null)
     var duplicateOnRestore by mutableStateOf(false)
+    var duplicateSummary by mutableStateOf<List<StockRecord>>(emptyList())
+    var importRows by mutableStateOf<List<ImportRow>?>(null)
     var migrationVoidedCount by mutableIntStateOf(0); private set
     var restoreCandidate by mutableStateOf<InventorySnapshot?>(null)
     var pendingExport: PendingExport? = null
@@ -74,9 +79,22 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun restoreVoided(id: String) {
-        duplicateOnRestore = true
-        perform("记录已还原") { it.restoreVoided(id) }
+    fun performMutation(success: String, after: () -> Unit = {}, work: (InventoryRepository) -> MutationResult) {
+        var result = MutationResult(0)
+        perform(success, after = { duplicateSummary = result.duplicateMachines; after() }) { result = work(it) }
+    }
+
+    fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
+        performMutation("还原处理完成") { it.restoreVoided(id, mode) }
+    }
+
+    fun restoreBackup(candidate: InventorySnapshot) {
+        performMutation("备份已合并") { repository ->
+            val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
+            val count = repository.restore(candidate)
+            val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
+            MutationResult(count, repository.snapshot().records.filter { it.id !in beforeIds && it.id in expectedActive && it.voided })
+        }
     }
 
     fun acknowledgeMigration() {
@@ -119,6 +137,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 withContext(Dispatchers.IO) {
                     getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.use { output ->
                         when (request.kind) {
+                            "template" -> InventoryImport.writeTemplate(output)
                             "xlsx" -> InventoryFiles.writeXlsx(request.snapshot, output, request.taskId, request.warehouseId)
                             "csv" -> InventoryFiles.writeCsvZip(request.snapshot, output, request.taskId, request.warehouseId)
                             else -> InventoryFiles.writeBackup(request.snapshot, output)
@@ -126,7 +145,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     } ?: error("无法打开保存位置，请重新选择")
                 }
                 val at = System.currentTimeMillis()
-                lastExport = "${formatTime(at)} · ${if (request.kind == "backup") "完整备份" else if (request.warehouseId == null) "全部仓库" else warehouseLabel(request.warehouseId)}"
+                lastExport = "${formatTime(at)} · ${if (request.kind == "template") "标准导入模板" else if (request.kind == "backup") "完整备份" else if (request.warehouseId == null) "全部仓库" else warehouseLabel(request.warehouseId)}"
                 preferences.edit().putString("last_export", lastExport).apply()
                 if (request.kind == "backup") {
                     lastBackupAt = request.snapshot.records.maxOfOrNull { it.updatedAt } ?: at
@@ -157,6 +176,49 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) { error = "备份未读取：${e.message}" }
             finally { busy = false }
         }
+    }
+
+    fun previewImport(uri: Uri?) {
+        if (uri == null || busy) return
+        busy = true
+        viewModelScope.launch {
+            try {
+                val rows = withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                    resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error("无法打开导入文件")
+                }
+                importRows = rows
+                message = "已读取 ${rows.size} 条，请选择目标仓库并确认导入"
+            } catch (e: Exception) { importRows = null; error = "导入文件未读取：${e.message}" }
+            finally { busy = false }
+        }
+    }
+
+    fun importDuplicateNotice(): String {
+        val seen = snapshot.records.filter { !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
+        val duplicates = importRows.orEmpty().filter { it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() && !seen.add(it.sn) }
+        return if (duplicates.isEmpty()) "" else "以下 ${duplicates.size} 台重复整机导入后进入作废区：\n" +
+            duplicates.groupingBy { "BOM ${it.bom} / SN ${it.sn}" }.eachCount().entries.joinToString("\n") { "${it.key} ×${it.value}" }
+    }
+
+    fun applyImport(warehouse: String, mode: DuplicateMode) {
+        val rows = importRows ?: return
+        val task = storageTaskId
+        performMutation("导入完成", after = { importRows = null }) { repository ->
+            repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
+                sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual") }, mode)
+        }
+    }
+
+    fun restoreDuplicateNotice(candidate: InventorySnapshot): String {
+        val existingIds = snapshot.records.mapTo(mutableSetOf()) { it.id }
+        val seen = snapshot.records.filter { !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
+        val duplicates = candidate.records.filter { it.id !in existingIds && !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() && !seen.add(it.sn) }
+        return if (duplicates.isEmpty()) "" else "以下 ${duplicates.size} 台新增重复整机将进入作废区：\n" +
+            duplicates.groupingBy { "BOM ${it.bom} / SN ${it.sn}" }.eachCount().entries.joinToString("\n") { "${it.key} ×${it.value}" }
     }
 
     fun warehouseLabel(id: String): String {
