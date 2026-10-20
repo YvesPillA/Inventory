@@ -9,6 +9,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.core.content.FileProvider
+import com.fieldstock.app.backup.AutomaticBackup
+import com.fieldstock.app.backup.AutomaticBackups
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.importdata.ImportRow
@@ -27,6 +30,7 @@ import java.time.format.DateTimeFormatter
 
 data class PendingExport(val kind: String, val snapshot: InventorySnapshot, val taskId: String?, val warehouseId: String?)
 private data class LoadedInventory(val snapshot: InventorySnapshot, val migrated: Int, val receipts: List<ImportReceipt>, val recovery: List<RecoveryPoint>)
+private data class AutomaticBackupStatus(val entries: List<AutomaticBackup>, val warning: String?)
 
 class InventoryViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = InventoryRepository(application)
@@ -34,6 +38,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     private val feedback = StockFeedback(application)
     private val operations = Mutex()
     private val exportCache = File(application.cacheDir, "pending-export.json")
+    private val automaticBackups = AutomaticBackups(File(application.filesDir, "automatic-backups"))
     var snapshot by mutableStateOf(InventorySnapshot()); private set
     var busy by mutableStateOf(false); private set
     // Legacy task IDs remain in backups for compatibility; they no longer scope inventory.
@@ -56,6 +61,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var pendingExport: PendingExport? = null
     var lastExport by mutableStateOf(preferences.getString("last_export", "尚未导出") ?: "尚未导出"); private set
     var lastBackupAt by mutableStateOf(preferences.getLong("backup_at", 0)); private set
+    var automaticBackupEnabled by mutableStateOf(preferences.getBoolean("automatic_backup", true)); private set
+    var automaticBackupEntries by mutableStateOf<List<AutomaticBackup>>(emptyList()); private set
+    var automaticBackupWarning by mutableStateOf<String?>(null); private set
 
     init { perform("") {} }
 
@@ -70,6 +78,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
           operations.withLock {
             try {
+                updateAutomaticStatus(withContext(Dispatchers.IO) { automaticStatus() })
                 val loaded = withContext(Dispatchers.IO) {
                     if (recoveryLabel == null) work(repository) else repository.recoverable(recoveryLabel, work)
                     LoadedInventory(repository.snapshot(), repository.pendingMigrationVoidedCount(), repository.importReceipts(), repository.recoveryPoints())
@@ -105,6 +114,84 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun setVibration(enabled: Boolean) { vibrationEnabled = enabled; preferences.edit().putBoolean("feedback_vibration", enabled).apply() }
     fun setSound(enabled: Boolean) { soundEnabled = enabled; preferences.edit().putBoolean("feedback_sound", enabled).apply() }
     fun testFeedback(duplicate: Boolean) = feedback.play(duplicate, vibrationEnabled, soundEnabled)
+
+    private fun automaticStatus(force: Boolean = false): AutomaticBackupStatus {
+        val attempt = runCatching {
+            if (force) automaticBackups.create(repository.snapshot())
+            else if (automaticBackupEnabled) automaticBackups.ensureDaily { repository.snapshot() }
+        }
+        return AutomaticBackupStatus(automaticBackups.entries(), attempt.exceptionOrNull()?.let { "完整备份未完成：${it.message ?: "请检查手机存储空间"}" })
+    }
+
+    private fun updateAutomaticStatus(status: AutomaticBackupStatus) {
+        automaticBackupEntries = status.entries
+        automaticBackupWarning = status.warning
+    }
+
+    fun setAutomaticBackup(enabled: Boolean) {
+        automaticBackupEnabled = enabled
+        preferences.edit().putBoolean("automatic_backup", enabled).apply()
+        if (enabled) checkDailyBackup()
+    }
+
+    /** Checked on startup, returning to the app, and before mutations. No background service needed. */
+    fun checkDailyBackup(force: Boolean = false) {
+        if (busy) return
+        busy = true
+        viewModelScope.launch {
+            operations.withLock {
+                try {
+                    val status = withContext(Dispatchers.IO) { automaticStatus(force) }
+                    updateAutomaticStatus(status)
+                    if (force && status.warning == null) message = "完整备份已保存到本机，可另存或分享带走"
+                } finally { busy = false }
+            }
+        }
+    }
+
+    fun previewAutomaticBackup(id: String) {
+        if (busy) return
+        busy = true
+        viewModelScope.launch {
+            operations.withLock {
+                try { restoreCandidate = withContext(Dispatchers.IO) { automaticBackups.read(id) } }
+                catch (failure: Exception) { error = "本机备份未读取：${failure.message}" }
+                finally { busy = false }
+            }
+        }
+    }
+
+    fun shareAutomaticBackup(id: String, ready: (Uri) -> Unit) {
+        if (busy) return
+        busy = true
+        viewModelScope.launch {
+            operations.withLock {
+                try {
+                    val application = getApplication<Application>()
+                    val uri = withContext(Dispatchers.IO) {
+                        val folder = File(application.cacheDir, "shared-backups")
+                        check(folder.isDirectory || folder.mkdirs()) { "无法准备分享文件" }
+                        // The ID is validated by copyTo before any file is published.
+                        require(automaticBackupEntries.any { it.id == id }) { "备份已清理，请重新选择" }
+                        val file = File(folder, id)
+                        if (!file.exists()) {
+                            val temporary = File.createTempFile("sharing-", ".tmp", folder)
+                            try {
+                                temporary.outputStream().use { automaticBackups.copyTo(id, it) }
+                                check(temporary.renameTo(file)) { "无法准备分享文件" }
+                            } finally { temporary.delete() }
+                        }
+                        val expired = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+                        folder.listFiles().orEmpty().filter { it.name != id && it.lastModified() < expired }.forEach { it.delete() }
+                        FileProvider.getUriForFile(application, "${application.packageName}.files", file)
+                    }
+                    ready(uri)
+                } catch (failure: Exception) { error = "无法分享备份：${failure.message}" }
+                finally { busy = false }
+            }
+        }
+    }
+
     fun undoRecovery(point: RecoveryPoint, after: () -> Unit = {}) { performMutation("已撤销：${point.label}", after = after, notify = true) { it.undoRecovery(point.id) } }
 
     fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
@@ -125,19 +212,22 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         perform("", after = { migrationVoidedCount = 0 }) { it.acknowledgeMigrationNotice() }
     }
 
-    fun prepareExport(kind: String, currentWarehouse: Boolean, launchPicker: () -> Unit) {
+    fun prepareExport(kind: String, currentWarehouse: Boolean, automaticId: String? = null, launchPicker: () -> Unit) {
         if (busy) return
         busy = true
-        val request = PendingExport(kind, snapshot, null,
+        val current = PendingExport(kind, snapshot, null,
             if (kind != "backup" && currentWarehouse) warehouseId else null)
         viewModelScope.launch {
             operations.withLock {
                 try {
-                    withContext(Dispatchers.IO) {
+                    val request = withContext(Dispatchers.IO) {
+                        val request = if (automaticId == null) current
+                            else PendingExport("backup", automaticBackups.read(automaticId), null, null)
                         exportCache.outputStream().use { InventoryFiles.writeBackup(request.snapshot, it) }
                         // Persist before showing another Activity so process recreation can finish the export.
                         check(preferences.edit().putString("pending_kind", request.kind).putString("pending_task", request.taskId)
                             .putString("pending_warehouse", request.warehouseId).commit()) { "无法保存导出请求" }
+                        request
                     }
                     pendingExport = request
                     launchPicker()

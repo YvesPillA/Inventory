@@ -16,9 +16,11 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,13 +52,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -64,17 +72,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.fieldstock.app.model.IdentifierRules
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * On-device label OCR. Launch with extra "field" = "BOM" or "SN".
  * Only a deliberate confirmation returns RESULT_OK, with extras "value" and "raw".
- * Preview snapshots are processed in memory and are never written to disk.
+ * The cropped review photo is temporary private cache, removed on rescan/exit.
  */
 class ScanActivity : ComponentActivity() {
     private var field = IdentifierField.BOM
@@ -90,6 +102,9 @@ class ScanActivity : ComponentActivity() {
     private var candidates by mutableStateOf(emptyList<OcrCandidate>())
     private var editedValue by mutableStateOf("")
     private var selectedCandidate by mutableStateOf<OcrCandidate?>(null)
+    private var reviewPhoto by mutableStateOf<Bitmap?>(null)
+    private var reviewImageId: String? = null
+    private val reviewImages by lazy { OcrReviewImages(this) }
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var boundPreview: Preview? = null
@@ -109,11 +124,14 @@ class ScanActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         field = if (intent.getStringExtra(EXTRA_FIELD).equals("SN", ignoreCase = true)) IdentifierField.SN else IdentifierField.BOM
         hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        reviewImages.clearExpired()
         if (savedInstanceState?.getBoolean("showResult") == true) {
             rawText = savedInstanceState.getString("rawText").orEmpty()
             editedValue = savedInstanceState.getString("editedValue").orEmpty()
             candidates = OcrCandidates.extract(rawText, field)
             selectedCandidate = candidates.firstOrNull { it.value == savedInstanceState.getString("selectedValue") }
+            reviewImageId = savedInstanceState.getString("reviewImageId")
+            reviewPhoto = reviewImages.load(reviewImageId)
             showResult = true
         }
         setContent {
@@ -138,6 +156,7 @@ class ScanActivity : ComponentActivity() {
         outState.putString("rawText", rawText)
         outState.putString("editedValue", editedValue)
         outState.putString("selectedValue", selectedCandidate?.value)
+        outState.putString("reviewImageId", reviewImageId)
         super.onSaveInstanceState(outState)
     }
 
@@ -168,6 +187,8 @@ class ScanActivity : ComponentActivity() {
         unbindCamera()
         recognizer?.close()
         recognizer = null
+        if (isFinishing) reviewImages.delete(reviewImageId)
+        reviewPhoto = null
         super.onDestroy()
     }
 
@@ -343,7 +364,9 @@ class ScanActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("核对标签后再填入", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("注意 O / 0、I / 1。点击候选后可以修改；保持前导零。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("对照照片核对 0/O、1/I、8/B，保留前导零和大小写。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            reviewPhoto?.let { photo -> LabelPhoto(photo) }
+                ?: Text("标签照片暂不可用。请对照实物核对，或重新扫描。", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             if (candidates.isEmpty()) {
                 Surface(color = Color(0xFFFFF1D6), shape = RoundedCornerShape(8.dp)) {
                     Text("没有找到符合格式的 ${field.name}。请重扫，或在下方手动输入。", Modifier.padding(14.dp))
@@ -383,6 +406,7 @@ class ScanActivity : ComponentActivity() {
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrect = false),
                 modifier = Modifier.fillMaxWidth(),
             )
+            CharacterReview(editedValue) { editedValue = it }
             Text("本次识别原文", fontWeight = FontWeight.SemiBold)
             Surface(color = Color(0xFFEAF0F7), shape = RoundedCornerShape(8.dp)) {
                 Text(rawText.ifBlank { "未识别到文字" }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
@@ -421,6 +445,9 @@ class ScanActivity : ComponentActivity() {
         busy = false
         error = null
         showResult = false
+        reviewImages.delete(reviewImageId)
+        reviewImageId = null
+        reviewPhoto = null
         hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (!hasPermission) permissionDenied = true
     }
@@ -512,15 +539,27 @@ class ScanActivity : ComponentActivity() {
             activeRecognizer.process(InputImage.fromBitmap(crop, 0))
                 .addOnSuccessListener { result ->
                     if (!activityAlive || generation != recognitionGeneration) return@addOnSuccessListener
-                    busy = false
                     if (result.text.isBlank()) {
+                        busy = false
                         error = "未识别到文字。请靠近标签、保持清晰后重试，也可返回手动输入。"
                     } else {
-                        rawText = result.text
-                        candidates = OcrCandidates.extract(rawText, field)
-                        selectedCandidate = candidates.singleOrNull()
-                        editedValue = selectedCandidate?.value.orEmpty()
-                        showResult = true
+                        // The ML task releases crop on completion; the IO job owns this separate copy.
+                        val picture = crop.copy(Bitmap.Config.ARGB_8888, false)
+                        lifecycleScope.launch {
+                            try {
+                                val saved = withContext(Dispatchers.IO) {
+                                    runCatching { reviewImages.save(picture) }.getOrNull()
+                                }
+                                val photo = withContext(Dispatchers.IO) { reviewImages.load(saved) }
+                                if (!activityAlive || generation != recognitionGeneration) {
+                                    reviewImages.delete(saved)
+                                    return@launch
+                                }
+                                reviewRecognition(result.text, saved, photo)
+                            } finally {
+                                picture.recycle()
+                            }
+                        }
                     }
                 }
                 .addOnFailureListener {
@@ -536,6 +575,19 @@ class ScanActivity : ComponentActivity() {
         }
     }
 
+    /** Shared by the recognition callback and device UI checks using generated labels. */
+    internal fun reviewRecognition(text: String, imageId: String?, photo: Bitmap?) {
+        if (imageId != reviewImageId) reviewImages.delete(reviewImageId)
+        reviewImageId = imageId
+        reviewPhoto = photo
+        rawText = text
+        candidates = OcrCandidates.extract(rawText, field)
+        selectedCandidate = candidates.singleOrNull()
+        editedValue = selectedCandidate?.value.orEmpty()
+        busy = false
+        showResult = true
+    }
+
     companion object {
         const val EXTRA_FIELD = "field"
         const val EXTRA_VALUE = "value"
@@ -544,5 +596,32 @@ class ScanActivity : ComponentActivity() {
         private const val ROI_TOP = 0.36f
         private const val ROI_RIGHT = 0.92f
         private const val ROI_BOTTOM = 0.64f
+    }
+}
+
+@Composable
+private fun LabelPhoto(photo: Bitmap) {
+    var scale by remember(photo) { mutableStateOf(1f) }
+    var offset by remember(photo) { mutableStateOf(Offset.Zero) }
+    Column {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("本次标签局部照片", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+            TextButton(onClick = { scale = 1f; offset = Offset.Zero }) { Text("重置照片") }
+        }
+        Box(Modifier.fillMaxWidth().height(150.dp).background(Color.White).clipToBounds()
+            .pointerInput(photo) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    scale = (scale * zoom).coerceIn(1f, 5f)
+                    val x = size.width * (scale - 1) / 2
+                    val y = size.height * (scale - 1) / 2
+                    offset = Offset((offset.x + pan.x).coerceIn(-x, x), (offset.y + pan.y).coerceIn(-y, y))
+                }
+            }) {
+            Image(photo.asImageBitmap(), contentDescription = "本次识别标签照片，可双指放大",
+                contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
+                })
+        }
+        Text("双指放大、拖动核对。照片仅暂存，退出扫描后清除。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

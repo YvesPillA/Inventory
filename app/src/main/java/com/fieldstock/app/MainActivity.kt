@@ -1,6 +1,7 @@
 package com.fieldstock.app
 
 import android.content.Intent
+import android.content.ClipData
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -34,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import com.fieldstock.app.model.*
 import com.fieldstock.app.scan.ScanActivity
 import java.time.LocalDateTime
@@ -48,6 +50,10 @@ internal val Ink = Color(0xFF193543)
 internal val Amber = Color(0xFF995010)
 
 class MainActivity : ComponentActivity() {
+    override fun onStart() {
+        super.onStart()
+        ViewModelProvider(this)[InventoryViewModel::class.java].checkDailyBackup()
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
@@ -144,10 +150,30 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         if (dirty) vm.error = "还有未保存输入，请先保存或清空后再恢复备份"
         else { vm.duplicateOnRestore = false; restore.launch(arrayOf("application/json", "application/octet-stream", "text/plain")) }
     }
+    val backupActions = BackupActions(
+        save = { entry ->
+            vm.prepareExport("backup", false, automaticId = entry.id) {
+                createBackup.launch("盘库完整备份-${entry.day}-${entry.at}.json")
+            }
+        },
+        share = { entry -> vm.shareAutomaticBackup(entry.id) { uri ->
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri("盘库完整备份", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(send, "分享完整备份"))
+        } },
+        restore = { entry ->
+            if (dirty) vm.error = "还有未保存输入，请先保存或清空后再恢复备份"
+            else { vm.duplicateOnRestore = false; vm.previewAutomaticBackup(entry.id) }
+        },
+    )
     LaunchedEffect(vm.message) { if (vm.message != null) { delay(3000); vm.message = null } }
 
     if (!entered || vm.snapshot.warehouses.none { it.id == vm.warehouseId }) {
-        WarehouseChooser(vm, onEnter = ::chooseWarehouse, onRestore = ::restoreBackup, onUndone = { clearForm(); keepBom = false })
+        WarehouseChooser(vm, onEnter = ::chooseWarehouse, onRestore = ::restoreBackup, onUndone = { clearForm(); keepBom = false }, backups = backupActions)
     } else Scaffold(containerColor = Mist, topBar = { WarehouseHeader(vm.warehouseLabel(vm.warehouseId)) }, bottomBar = {
         if (!keyboardVisible) NavigationBar(containerColor = Color.White) {
             val icons = listOf(Icons.Default.Edit, Icons.Default.List, Icons.Default.Share, Icons.Default.Settings)
@@ -255,8 +281,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                         when (type) { "xlsx" -> createXlsx.launch("盘库_${stamp}.xlsx"); "csv" -> createCsv.launch("盘库CSV_${stamp}.zip"); else -> createBackup.launch("盘库完整备份_${stamp}.json") }
                     }
                 }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("text/csv", "text/comma-separated-values", "application/vnd.ms-excel", "text/plain")) },
-                    onTemplate = { vm.prepareExport("template", false) { createTemplate.launch("盘库导入模板.csv") } })
-                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false })
+                    onTemplate = { vm.prepareExport("template", false) { createTemplate.launch("盘库导入模板.csv") } }, backups = backupActions)
+                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions)
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
         }

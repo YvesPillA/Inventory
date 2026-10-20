@@ -1,0 +1,9 @@
+0.2.3 final signed Release upgrade and automatic backup save-as
+Android11/API30, emulator-5556, 720x1280px, density320, airplane mode
+1. Fresh 0.2.2 Release: QA23 / Upgrade, UPG0023=5, KEEP23=2.
+2. Covering install of final 0.2.3 Release: same warehouse and 7 parts retained.
+3. Automatic backup generated on first use after upgrade.
+4. Opened backup list, selected save-as, completed actual Android CreateDocument in Downloads.
+5. Pulled JSON and validated SHA256; records: [('KEEP23', 2, False), ('UPG0023', 5, False)]; countries=1, warehouses=1, audits=2.
+APK SHA256: a30afe0ce0ec3cee79302c50c48d5fc1d2fb8895ee44120033d4de2eb119a9bb
+PASS

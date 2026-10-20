@@ -1,0 +1,11 @@
+0.2.3 JVM / Robolectric results
+com.fieldstock.app.backup.AutomaticBackupsTest: tests=14, failures=0, errors=0
+com.fieldstock.app.data.InventoryRepositoryTest: tests=47, failures=0, errors=0
+com.fieldstock.app.export.InventoryFilesTest: tests=9, failures=0, errors=0
+com.fieldstock.app.importdata.ImportPreviewTest: tests=4, failures=0, errors=0
+com.fieldstock.app.importdata.InventoryImportTest: tests=10, failures=0, errors=0
+com.fieldstock.app.model.IdentifierRulesTest: tests=2, failures=0, errors=0
+com.fieldstock.app.scan.OcrCandidatesTest: tests=14, failures=0, errors=0
+com.fieldstock.app.scan.OcrCharacterReviewTest: tests=4, failures=0, errors=0
+com.fieldstock.app.scan.OcrReviewImagesTest: tests=3, failures=0, errors=0
+TOTAL: 107 tests, 0 failures, 0 errors
