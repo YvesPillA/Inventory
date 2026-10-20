@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.fieldstock.app.model.*
 
 @Composable
-internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit, onRestore: () -> Unit, onUndone: () -> Unit = {}) {
+internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit, onRestore: () -> Unit, onUndone: () -> Unit = {}, backups: BackupActions) {
     Surface(color = Mist, modifier = Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
           WarehouseHeader("盘库助手")
@@ -35,6 +35,7 @@ internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit,
             WarehousePicker(vm, "进入仓库", onEnter = onEnter)
             TextButton(onClick = onRestore, enabled = !vm.busy) { Text("从备份恢复") }
             if (vm.recoveryPoints.isNotEmpty()) RecoveryAccess(vm, onUndone)
+            AutomaticBackupPanel(vm, backups)
             vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
           }
@@ -104,7 +105,7 @@ private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, allowCre
 }
 
 @Composable
-internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit, onStructureChanged: () -> Unit = {}) {
+internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit, onStructureChanged: () -> Unit = {}, backups: BackupActions) {
     var rename by remember { mutableStateOf<Pair<String, String>?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var deleting by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -142,10 +143,12 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
             TextButton(onClick = { vm.testFeedback(true) }, enabled = !vm.busy) { Text("试重复提示") }
         }
         HorizontalDivider()
+        AutomaticBackupPanel(vm, backups, settings = true)
+        HorizontalDivider()
         RecoveryAccess(vm, onStructureChanged)
         OutlinedButton(onClick = onRestore, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text("从备份合并恢复") }
         Text("BOM：字母数字最多14位。\nSN：两段字母数字合计最多14位，横线自动补齐。\n前导零和大小写保留，SN在所有仓库中唯一。", fontSize = 14.sp, color = Color(0xFF526775))
-        Text("盘库助手 0.2.2 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
+        Text("盘库助手 0.2.3 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
     }
     rename?.let { request -> AlertDialog(onDismissRequest = { rename = null }, title = { Text("修改名称") },
@@ -290,7 +293,7 @@ internal fun DuplicateModePicker(mode: DuplicateMode, onSelect: (DuplicateMode) 
 }
 
 @Composable
-internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, onImport: () -> Unit, onTemplate: () -> Unit) {
+internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, onImport: () -> Unit, onTemplate: () -> Unit, backups: BackupActions) {
     var section by rememberSaveable { mutableStateOf("export") }
     var targetWarehouse by rememberSaveable { mutableStateOf(vm.warehouseId) }
     var mode by remember { mutableStateOf(DuplicateMode.NEW_ENTRY) }
@@ -298,7 +301,7 @@ internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, 
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ChoiceRow(listOf("import" to "导入", "export" to "导出"), section, !vm.busy) { section = it } }
         Box(Modifier.weight(1f)) {
-            if (section == "export") ExportPage(vm, onExport)
+            if (section == "export") ExportPage(vm, onExport, backups)
             else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("导入库存文件", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("使用 CSV 模板，BOM、SN 按文本填写以保留前导零。导入目标独立选择，不改变当前盘点仓库。", fontSize = 14.sp, color = Petrol)
@@ -354,7 +357,7 @@ internal fun RecoveryAccess(vm: InventoryViewModel, onUndone: () -> Unit = {}) {
 }
 
 @Composable
-internal fun ExportPage(vm: InventoryViewModel, onExport: (String) -> Unit) {
+internal fun ExportPage(vm: InventoryViewModel, onExport: (String) -> Unit, backups: BackupActions) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("导出", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text("明细和汇总仅导出当前仓库。", color = Color(0xFF526775), fontSize = 14.sp)
@@ -366,6 +369,7 @@ internal fun ExportPage(vm: InventoryViewModel, onExport: (String) -> Unit) {
         Text("包含所有国家和仓库、作废记录及修改历史。已永久删除的记录不再包含。", fontSize = 14.sp)
         FilledTonalButton(onClick = { onExport("backup") }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("保存完整备份") }
         Text("最近成功保存\n${vm.lastExport}", fontSize = 13.sp, color = Color(0xFF526775))
+        AutomaticBackupPanel(vm, backups)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
         Text("每天收工后，把 Excel 和完整备份复制到电脑或其他位置。", fontSize = 14.sp, color = Petrol)
     }

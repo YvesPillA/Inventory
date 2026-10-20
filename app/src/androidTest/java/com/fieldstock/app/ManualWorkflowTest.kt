@@ -12,6 +12,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.fieldstock.app.data.InventoryRepository
+import com.fieldstock.app.backup.AutomaticBackups
+import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.model.ItemKind
 import com.fieldstock.app.model.RecordInput
 import com.fieldstock.app.model.StockRecord
@@ -36,6 +38,8 @@ class ManualWorkflowTest {
         context = ApplicationProvider.getApplicationContext()
         context.databaseList().forEach { context.deleteDatabase(it) }
         context.getSharedPreferences("fieldstock", 0).edit().clear().commit()
+        File(context.filesDir, "automatic-backups").deleteRecursively()
+        File(context.cacheDir, "shared-backups").deleteRecursively()
         InventoryRepository(context).use {
             val country = it.addCountry("测试国")
             warehouseId = it.addWarehouse(country.id, "测试仓").id
@@ -78,6 +82,11 @@ class ManualWorkflowTest {
     private fun save() { compose.onNodeWithText("保存这一条").assertIsDisplayed().assertIsEnabled().performClick() }
     private fun records(): List<StockRecord> = InventoryRepository(context).use { it.snapshot().records }
     private fun count(): Int = records().size
+    private fun awaitBackups(expected: Int) {
+        lateinit var model: InventoryViewModel
+        scenario!!.onActivity { model = ViewModelProvider(it)[InventoryViewModel::class.java] }
+        compose.waitUntil(15_000) { !model.busy && model.automaticBackupEntries.size == expected }
+    }
 
     private fun seed(
         kind: ItemKind,
@@ -493,5 +502,109 @@ class ManualWorkflowTest {
         compose.waitUntil(10_000) { compose.onAllNodesWithContentDescription("保存震动").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("保存震动").performScrollTo().assertIsOff()
         compose.onNodeWithContentDescription("提示声音").performScrollTo().assertIsOn()
+    }
+
+    @Test fun localBackupCanRestoreAfterDeletingLastCountry() {
+        val active = seed(ItemKind.PART, "BACKUP023", quantity = 8)
+        val archived = seed(ItemKind.MACHINE, "M023", "AA-023", voided = true)
+        launchAndEnterWarehouse()
+        openSettings()
+        compose.onNodeWithContentDescription("每日自动完整备份").performScrollTo().assertIsOn()
+        compose.onNodeWithText("立即备份").performScrollTo().performClick()
+        awaitBackups(2)
+        capture("automatic-backup-settings")
+        compose.onNodeWithText("删除当前国家").performScrollTo().performClick()
+        compose.onNodeWithText("继续删除").performClick()
+        compose.onNodeWithText("确认删除国家").performClick()
+        compose.waitUntil(15_000) { count() == 0 && compose.onAllNodesWithText("选择盘点仓库").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("查看本机备份").performScrollTo().performClick()
+        capture("automatic-backup-list")
+        compose.onAllNodesWithText("恢复").onFirst().performClick()
+        compose.onNodeWithText("合并这个备份？").assertIsDisplayed()
+        compose.onNodeWithText("检查并合并").performClick()
+        compose.waitUntil(15_000) { count() == 2 }
+        assertEquals(8, records().single { it.id == active.id }.quantity)
+        assertTrue(records().single { it.id == archived.id }.voided)
+        InventoryRepository(context).use { assertTrue(it.snapshot().changes.any { change -> change.recordId == active.id }) }
+    }
+
+    @Test fun automaticBackupCanBeDisabledAndManualBackupStillWorksAfterRecreation() {
+        seed(ItemKind.PART, "MANUAL023", quantity = 3)
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithContentDescription("每日自动完整备份").performScrollTo().assertIsOn().performClick().assertIsOff()
+        scenario!!.recreate()
+        compose.waitUntil(10_000) { compose.onAllNodesWithContentDescription("每日自动完整备份").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("每日自动完整备份").performScrollTo().assertIsOff()
+        val backups = AutomaticBackups(File(context.filesDir, "automatic-backups"))
+        assertEquals(1, backups.entries().size)
+        compose.onNodeWithText("立即备份").performScrollTo().performClick()
+        awaitBackups(2)
+        assertEquals(3, backups.read(backups.entries().first().id).records.single().quantity)
+        assertEquals(1, count())
+    }
+
+    @Test fun backupFailureDoesNotBlockSavingAndCanBeRetried() {
+        val blocked = File(context.filesDir, "automatic-backups").apply { writeText("blocked for IO failure test") }
+        launchAndEnterWarehouse()
+        enter("BOM", "SAVE023"); enter("数量（件）", "6"); save()
+        compose.waitUntil(10_000) { count() == 1 }
+        openSettings()
+        compose.onNodeWithText("完整备份未完成", substring = true).performScrollTo().assertIsDisplayed()
+        assertTrue(blocked.delete())
+        compose.onNodeWithText("立即备份").performScrollTo().performClick()
+        val backups = AutomaticBackups(blocked)
+        awaitBackups(1)
+        assertEquals(6, backups.read(backups.entries().first().id).records.single().quantity)
+        compose.onNodeWithText("完整备份未完成", substring = true).assertDoesNotExist()
+        assertEquals(1, count())
+    }
+
+    @Test fun sharedBackupUsesReadableContentUriAndKeepsInventory() {
+        val saved = seed(ItemKind.PART, "SHARE023", quantity = 4)
+        launchAndEnterWarehouse()
+        val entry = AutomaticBackups(File(context.filesDir, "automatic-backups")).entries().single()
+        var shared: Uri? = null
+        scenario!!.onActivity { activity ->
+            ViewModelProvider(activity)[InventoryViewModel::class.java].shareAutomaticBackup(entry.id) { shared = it }
+        }
+        compose.waitUntil(15_000) { shared != null }
+        assertEquals("content", shared!!.scheme)
+        assertEquals("com.fieldstock.app.files", shared!!.authority)
+        val data = context.contentResolver.openInputStream(shared!!)!!.use(InventoryFiles::readBackup)
+        assertEquals(saved.id, data.records.single().id)
+        assertEquals(4, data.records.single().quantity)
+        assertEquals(1, count())
+        val firstUri = shared!!
+        seed(ItemKind.PART, "SHARELATER", quantity = 2)
+        scenario!!.onActivity { activity -> ViewModelProvider(activity)[InventoryViewModel::class.java].checkDailyBackup(force = true) }
+        val backups = AutomaticBackups(File(context.filesDir, "automatic-backups"))
+        awaitBackups(2)
+        val newer = backups.entries().first()
+        shared = null
+        scenario!!.onActivity { activity -> ViewModelProvider(activity)[InventoryViewModel::class.java].shareAutomaticBackup(newer.id) { shared = it } }
+        compose.waitUntil(15_000) { shared != null }
+        assertEquals(2, context.contentResolver.openInputStream(shared!!)!!.use(InventoryFiles::readBackup).records.size)
+        assertEquals(saved.id, context.contentResolver.openInputStream(firstUri)!!.use(InventoryFiles::readBackup).records.single().id)
+        assertEquals(2, count())
+    }
+
+    @Test fun savingSelectedAutomaticBackupUsesItsSnapshotInsteadOfCurrentInventory() {
+        val original = seed(ItemKind.PART, "OLD023", quantity = 5)
+        launchAndEnterWarehouse()
+        val entry = AutomaticBackups(File(context.filesDir, "automatic-backups")).entries().single()
+        seed(ItemKind.PART, "NEW023", quantity = 2)
+        var ready = false
+        scenario!!.onActivity { activity ->
+            ViewModelProvider(activity)[InventoryViewModel::class.java].prepareExport("backup", false, automaticId = entry.id) { ready = true }
+        }
+        compose.waitUntil(15_000) { ready }
+        val output = File(context.cacheDir, "selected-automatic-backup.json")
+        scenario!!.onActivity { activity -> ViewModelProvider(activity)[InventoryViewModel::class.java].export(Uri.fromFile(output)) }
+        compose.waitUntil(15_000) { output.exists() && !context.getSharedPreferences("fieldstock", 0).contains("pending_kind") }
+        val data = output.inputStream().use(InventoryFiles::readBackup)
+        assertEquals(original.id, data.records.single().id)
+        assertEquals(5, data.records.single().quantity)
+        assertEquals(2, count())
+        output.delete()
     }
 }
