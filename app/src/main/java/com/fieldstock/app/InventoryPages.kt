@@ -148,7 +148,7 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
         RecoveryAccess(vm, onStructureChanged)
         OutlinedButton(onClick = onRestore, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text("从备份合并恢复") }
         Text("BOM：字母数字最多14位。\nSN：两段字母数字合计最多14位，横线自动补齐。\n前导零和大小写保留，SN在所有仓库中唯一。", fontSize = 14.sp, color = Color(0xFF526775))
-        Text("盘库助手 0.2.3 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
+        Text("盘库助手 0.2.4 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
     }
     rename?.let { request -> AlertDialog(onDismissRequest = { rename = null }, title = { Text("修改名称") },

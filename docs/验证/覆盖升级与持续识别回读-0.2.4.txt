@@ -1,0 +1,9 @@
+0.2.4 final signed Release / continuous camera / inventory readback
+Android11/API30 emulator, 720x1280px, density320, airplane mode
+1. Data seeded on signed 0.2.3: QA24 / Upgrade, UPG0024=5, KEEP24=2.
+2. Updated to 0.2.4 and then covered with final signed 0.2.4; country, warehouse and seven parts retained.
+3. Final package entered continuous BOM scan, processed actual emulator preview, paused and returned without saving.
+4. Inventory remained seven parts; exported complete JSON via actual Android CreateDocument.
+5. Pulled JSON; SHA256 valid, countries=1, warehouses=1, audits=2; records=[('KEEP24', 2, False), ('UPG0024', 5, False)].
+APK SHA256: 81022e7176b5e453218cbf6d6e8a1705053efef742debb9943ade5140d74b5af
+PASS
