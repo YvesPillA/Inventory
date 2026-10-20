@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.fieldstock.app.model.Country
 import com.fieldstock.app.model.DuplicateSnException
 import com.fieldstock.app.model.DuplicateMode
+import com.fieldstock.app.model.ImportMetadata
 import com.fieldstock.app.model.InventorySnapshot
 import com.fieldstock.app.model.InventoryTask
 import com.fieldstock.app.model.ItemKind
@@ -708,6 +709,143 @@ class InventoryRepositoryTest {
         assertEquals(2, state.records.size)
         assertThrows(IllegalArgumentException::class.java) { repository.mergeParts(state.records.mapTo(mutableSetOf()) { it.id }) }
         assertEquals(state, repository.snapshot())
+    }
+
+    @Test fun undoImportRestoresQuantityAndReceiptButPreservesLaterUnrelatedInventory() {
+        val f = fixture()
+        val original = repository.save(input(f).copy(quantity = 4))
+        repository.recoverable("CSV导入") { it.importRecords(listOf(input(f).copy(quantity = 6), input(f, ItemKind.MACHINE, "AA-001")), DuplicateMode.ADD_QUANTITY, ImportMetadata("a".repeat(64), "a.csv")) }
+        val point = repository.recoveryPoints().single()
+        assertEquals(1, repository.importReceipts().size)
+        val unrelated = repository.save(input(f).copy(bom = "OTHER", quantity = 7))
+        assertEquals(2, repository.undoRecovery(point.id).processed)
+        val state = repository.snapshot()
+        assertEquals(setOf(original.id, unrelated.id), state.records.map { it.id }.toSet())
+        assertEquals(4, state.records.single { it.id == original.id }.quantity)
+        assertTrue(repository.importReceipts().isEmpty())
+        assertTrue(repository.recoveryPoints().single().undone)
+        assertThrows(IllegalArgumentException::class.java) { repository.undoRecovery(point.id) }
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test fun undoRefusesRelatedEditsWithoutChangingAnything() {
+        val f = fixture()
+        val original = repository.save(input(f).copy(quantity = 4))
+        repository.recoverable("相加") { it.importRecords(listOf(input(f)), DuplicateMode.ADD_QUANTITY) }
+        repository.save(input(f).copy(quantity = 20), original.id)
+        val before = repository.snapshot()
+        val point = repository.recoveryPoints().single()
+        assertThrows(IllegalArgumentException::class.java) { repository.undoRecovery(point.id) }
+        assertEquals(before, repository.snapshot())
+        assertFalse(repository.recoveryPoints().single().undone)
+    }
+
+    @Test fun failedImportantOperationRollsBackInventoryReceiptAndRecoveryPoint() {
+        val f = fixture()
+        val before = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) {
+            repository.recoverable("错误导入") { it.importRecords(listOf(input(f)), DuplicateMode.NEW_ENTRY, ImportMetadata("invalid", "x.csv")) }
+        }
+        assertEquals(before, repository.snapshot())
+        assertTrue(repository.importReceipts().isEmpty())
+        assertTrue(repository.recoveryPoints().isEmpty())
+        repository.recoverable("无变化") { it.snapshot() }
+        assertTrue(repository.recoveryPoints().isEmpty())
+    }
+
+    @Test fun undoCountryDeletionRestoresRecordsAndQuarantinesSerialsReusedSinceDeletion() {
+        val f = fixture()
+        val original = repository.save(input(f, ItemKind.MACHINE, "AA-001"))
+        repository.recoverable("删除国家") { it.deleteCountry(f.country.id) }
+        val point = repository.recoveryPoints().single()
+        val other = repository.addWarehouse(repository.addCountry("其他国").id, "其他仓")
+        val newMachine = repository.save(input(f, ItemKind.MACHINE, "AA-001").copy(warehouseId = other.id, bom = "OTHER"))
+        val result = repository.undoRecovery(point.id)
+        assertEquals(original.id, result.duplicateMachines.single().id)
+        val state = repository.snapshot()
+        assertTrue(state.records.single { it.id == original.id }.voided)
+        assertFalse(state.records.single { it.id == newMachine.id }.voided)
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test fun undoWarehouseMergeRestoresSourceAndImportHistoryWithoutRemovingLaterTargetRows() {
+        val f = fixture()
+        val target = repository.addWarehouse(f.country.id, "目标仓")
+        val original = repository.save(input(f).copy(quantity = 4, warehouseId = target.id))
+        repository.importRecords(listOf(input(f).copy(quantity = 6)), DuplicateMode.NEW_ENTRY, ImportMetadata("a".repeat(64), "a.csv"))
+        repository.recoverable("合并仓库") { it.mergeWarehouses(f.warehouse.id, target.id, DuplicateMode.ADD_QUANTITY) }
+        val point = repository.recoveryPoints().single()
+        assertEquals(target.id, repository.importReceipts().single().warehouseId)
+        val unrelated = repository.save(input(f).copy(bom = "OTHER", warehouseId = target.id))
+        repository.undoRecovery(point.id)
+        val state = repository.snapshot()
+        assertTrue(state.warehouses.any { it.id == f.warehouse.id })
+        assertEquals(4, state.records.single { it.id == original.id }.quantity)
+        assertTrue(state.records.any { it.id == unrelated.id })
+        assertEquals(f.warehouse.id, repository.importReceipts().single().warehouseId)
+        assertEquals(0, repository.restore(state))
+    }
+
+    @Test fun nameConflictDuringUndoRollsBackTheEntireReplacement() {
+        val f = fixture()
+        repository.save(input(f))
+        repository.recoverable("删除国家") { it.deleteCountry(f.country.id) }
+        val point = repository.recoveryPoints().single()
+        repository.addCountry(f.country.name)
+        val current = repository.snapshot()
+        assertThrows(IllegalArgumentException::class.java) { repository.undoRecovery(point.id) }
+        assertEquals(current, repository.snapshot())
+        assertFalse(repository.recoveryPoints().single().undone)
+    }
+
+    @Test fun recoveryPointsPersistAcrossReopenAndRetainOnlyLatestFiveOperations() {
+        val f = fixture()
+        repeat(7) { index -> repository.recoverable("导入 $index") { it.importRecords(listOf(input(f).copy(bom = "PART$index")), DuplicateMode.NEW_ENTRY) } }
+        repository.close(); repository = InventoryRepository(context)
+        val points = repository.recoveryPoints()
+        assertEquals(5, points.size)
+        assertEquals("导入 6", points.first().label)
+        assertEquals("导入 2", points.last().label)
+        repository.undoRecovery(points.first().id)
+        assertEquals(6, repository.snapshot().records.size)
+        assertTrue(repository.recoveryPoints().first().undone)
+    }
+
+    @Test fun schemaThreeUpgradeKeepsInventoryAndAddsEmptyOperationTables() {
+        val f = fixture()
+        repository.save(input(f))
+        val before = repository.snapshot(); repository.close()
+        SQLiteDatabase.openDatabase(context.getDatabasePath(InventoryRepository.DATABASE_NAME).path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+            db.execSQL("DROP TABLE recovery_points"); db.execSQL("DROP TABLE import_receipts"); db.version = 3
+        }
+        repository = InventoryRepository(context)
+        assertEquals(before, repository.snapshot())
+        assertTrue(repository.recoveryPoints().isEmpty())
+        assertTrue(repository.importReceipts().isEmpty())
+    }
+
+    @Test fun undoLatestRepeatImportKeepsEarlierReceiptAndEarlierQuantity() {
+        val f = fixture()
+        repeat(2) { repository.recoverable("导入") { it.importRecords(listOf(input(f).copy(quantity = 3)), DuplicateMode.ADD_QUANTITY, ImportMetadata("a".repeat(64), "same.csv")) } }
+        assertEquals(2, repository.importReceipts().size)
+        val latest = repository.recoveryPoints().first()
+        repository.undoRecovery(latest.id)
+        assertEquals(3, repository.snapshot().records.single().quantity)
+        assertEquals(1, repository.importReceipts().size)
+    }
+
+    @Test fun undoAdditiveRestoreReturnsConsumedSourceToVoidedAndKeepsOriginalQuantity() {
+        val f = fixture()
+        val target = repository.save(input(f).copy(quantity = 4))
+        val source = repository.save(input(f).copy(quantity = 6))
+        repository.voidRecord(source.id)
+        val before = repository.snapshot()
+        repository.recoverable("还原并相加") { it.restoreVoided(source.id, DuplicateMode.ADD_QUANTITY) }
+        assertEquals(10, repository.snapshot().records.single().quantity)
+        repository.undoRecovery(repository.recoveryPoints().single().id)
+        assertEquals(before, repository.snapshot())
+        assertEquals(4, repository.snapshot().records.single { it.id == target.id }.quantity)
+        assertTrue(repository.snapshot().records.single { it.id == source.id }.voided)
     }
 
     private data class Fixture(val task: InventoryTask, val country: Country, val warehouse: Warehouse)

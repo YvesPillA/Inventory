@@ -434,4 +434,64 @@ class ManualWorkflowTest {
         compose.onNodeWithText("盘点").performClick()
         compose.onNodeWithText("测试国 / 测试仓").assertIsDisplayed()
     }
+
+    @Test fun repeatedCsvShowsQuantityPreviewAndCanBeUndoneAsOneOperation() {
+        val original = seed(ItemKind.PART, "SUM001", quantity = 4)
+        launchAndEnterWarehouse()
+        val content = "类型,BOM,SN,数量,状态,备注\n配件,SUM001,,3,正常,\n整机,MODEL,AA-001,1,正常,\n整机,MODEL,AA-001,1,正常,\n"
+        val first = File(context.cacheDir, "first.csv").apply { writeText(content, Charsets.UTF_8) }
+        scenario!!.onActivity { ViewModelProvider(it)[InventoryViewModel::class.java].previewImport(Uri.fromFile(first)) }
+        compose.onNodeWithText("处理").performClick(); compose.onNodeWithText("导入").performClick()
+        compose.onNodeWithText("添加到已有数量").performScrollTo().performClick()
+        compose.onNodeWithText("预览并确认导入").performScrollTo().performClick()
+        compose.onAllNodesWithText("配件正式数量增加 3 件", substring = true).onLast().assertIsDisplayed()
+        assertEquals(4, records().single().quantity)
+        capture("quantity-preview")
+        compose.onNodeWithText("确认导入").performClick()
+        compose.waitUntil(15_000) { count() == 3 && compose.onAllNodesWithText("重复 SN 已保留在作废页").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("知道了").performClick()
+        val renamed = File(context.cacheDir, "renamed.csv").apply { writeText("\uFEFF" + content.replace("\n", "\r\n"), Charsets.UTF_8) }
+        scenario!!.onActivity { ViewModelProvider(it)[InventoryViewModel::class.java].previewImport(Uri.fromFile(renamed)) }
+        compose.onNodeWithText("预览并确认导入").performScrollTo().performClick()
+        compose.onNodeWithText("这个文件内容曾导入过").assertIsDisplayed()
+        assertEquals(7, records().single { it.id == original.id }.quantity)
+        capture("repeat-import-warning")
+        compose.onNodeWithText("仍要重复导入").assertIsDisplayed().performClick()
+        compose.waitUntil(15_000) { count() == 5 && compose.onAllNodesWithText("知道了").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("知道了").performClick()
+        assertEquals(10, records().single { it.id == original.id }.quantity)
+        openSettings()
+        compose.onNodeWithText("撤销重要操作").performScrollTo().performClick()
+        compose.onAllNodesWithText("撤销这次操作").onFirst().performClick()
+        compose.onNodeWithText("确认撤销").assertIsDisplayed().performClick()
+        compose.waitUntil(15_000) { count() == 3 && records().single { it.id == original.id }.quantity == 7 }
+        InventoryRepository(context).use { assertEquals(1, it.importReceipts().size); assertTrue(it.recoveryPoints().first().undone) }
+    }
+
+    @Test fun lastCountryDeletionCanBeUndoneDirectlyFromWarehouseChooser() {
+        val original = seed(ItemKind.PART, "RESTORE001", quantity = 9)
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithText("删除当前国家").performScrollTo().performClick()
+        compose.onNodeWithText("继续删除").performClick(); compose.onNodeWithText("确认删除国家").performClick()
+        compose.waitUntil(15_000) { count() == 0 && compose.onAllNodesWithText("选择盘点仓库").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("撤销重要操作").performScrollTo().performClick()
+        compose.onNodeWithText("撤销这次操作").performClick()
+        compose.onNodeWithText("确认撤销").performClick()
+        compose.waitUntil(15_000) { records().singleOrNull()?.id == original.id }
+        assertEquals(9, records().single().quantity)
+        InventoryRepository(context).use { assertEquals("测试国", it.snapshot().countries.single().name) }
+    }
+
+    @Test fun vibrationAndSoundPreferencesPersistAndFeedbackPreviewDoesNotCreateInventory() {
+        launchAndEnterWarehouse(); openSettings()
+        compose.onNodeWithContentDescription("保存震动").performScrollTo().assertIsOn().performClick().assertIsOff()
+        compose.onNodeWithContentDescription("提示声音").performScrollTo().assertIsOff().performClick().assertIsOn()
+        compose.onNodeWithText("试成功提示").performScrollTo().performClick()
+        compose.onNodeWithText("试重复提示").performScrollTo().performClick()
+        assertEquals(0, count())
+        scenario!!.recreate()
+        compose.waitUntil(10_000) { compose.onAllNodesWithContentDescription("保存震动").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("保存震动").performScrollTo().assertIsOff()
+        compose.onNodeWithContentDescription("提示声音").performScrollTo().assertIsOn()
+    }
 }

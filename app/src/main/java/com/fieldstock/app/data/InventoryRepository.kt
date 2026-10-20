@@ -17,6 +17,11 @@ import com.fieldstock.app.model.MutationResult
 import com.fieldstock.app.model.RecordInput
 import com.fieldstock.app.model.StockRecord
 import com.fieldstock.app.model.Warehouse
+import com.fieldstock.app.model.ImportMetadata
+import com.fieldstock.app.model.ImportReceipt
+import com.fieldstock.app.model.RecoveryPoint
+import com.fieldstock.app.export.InventoryFiles
+import java.io.ByteArrayOutputStream
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.Locale
@@ -28,6 +33,127 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun snapshot(): InventorySnapshot = transaction { db -> readSnapshot(db) }
+
+    @Synchronized
+    fun importReceipts(): List<ImportReceipt> = transaction { readReceipts(it) }
+
+    @Synchronized
+    fun recoveryPoints(): List<RecoveryPoint> = transaction { db ->
+        db.query("recovery_points", arrayOf("id", "label", "at", "record_count", "undone"), null, null, null, null, "at DESC, rowid DESC").use { c ->
+            buildList { while (c.moveToNext()) add(RecoveryPoint(c.string("id"), c.string("label"), c.long("at"), c.int("record_count"), c.int("undone") != 0)) }
+        }
+    }
+
+    /** Snapshot, stock changes, import receipt and recovery point commit together or not at all. */
+    @Synchronized
+    fun <T> recoverable(label: String, work: (InventoryRepository) -> T): T = transaction { db ->
+        require(label.isNotBlank() && label.length <= 512) { "恢复点名称无效" }
+        val before = readSnapshot(db)
+        val receiptsBefore = readReceipts(db)
+        val beforeBytes = encodeSnapshot(before)
+        val result = work(this)
+        val after = readSnapshot(db)
+        val receiptsAfter = readReceipts(db)
+        if (before != after || receiptsBefore != receiptsAfter) {
+            val afterBytes = encodeSnapshot(after)
+            val oldReceipts = receiptsJson(receiptsBefore)
+            val newReceipts = receiptsJson(receiptsAfter)
+            val size = beforeBytes.size.toLong() + afterBytes.size + oldReceipts.toByteArray(Charsets.UTF_8).size + newReceipts.toByteArray(Charsets.UTF_8).size
+            require(size <= MAX_RECOVERY_BYTES) { "恢复点超过容量上限，操作未执行，请先导出并整理历史数据" }
+            val a = before.records.associateBy { it.id }; val b = after.records.associateBy { it.id }
+            db.insertOrThrow("recovery_points", null, ContentValues().apply {
+                put("id", newId()); put("label", label); put("at", System.currentTimeMillis()); put("undone", 0)
+                put("record_count", (a.keys + b.keys).count { a[it] != b[it] })
+                put("before_blob", beforeBytes); put("after_blob", afterBytes)
+                put("before_receipts", oldReceipts); put("after_receipts", newReceipts); put("size_bytes", size)
+            })
+            val stored = db.query("recovery_points", arrayOf("id", "size_bytes"), null, null, null, null, "at ASC, rowid ASC").use { c ->
+                buildList { while (c.moveToNext()) add(c.string("id") to c.long("size_bytes")) }
+            }.toMutableList()
+            var total = stored.sumOf { it.second }
+            while (stored.size > 5 || total > MAX_RECOVERY_BYTES) {
+                val oldest = stored.removeAt(0); total -= oldest.second
+                db.delete("recovery_points", "id = ?", arrayOf(oldest.first))
+            }
+        }
+        result
+    }
+
+    @Synchronized
+    fun undoRecovery(id: String): MutationResult = transaction { db ->
+        data class Stored(val before: InventorySnapshot, val after: InventorySnapshot, val beforeReceipts: List<ImportReceipt>, val afterReceipts: List<ImportReceipt>)
+        val stored = db.query("recovery_points", arrayOf("undone"), "id = ?", arrayOf(id), null, null, null).use { c ->
+            require(c.moveToFirst()) { "恢复点已清理或不存在" }
+            require(c.int("undone") == 0) { "这次操作已经撤销，不能再次撤销" }
+            Stored(InventoryFiles.readBackup(readRecoveryBytes(db, id, "before_blob").inputStream()),
+                InventoryFiles.readBackup(readRecoveryBytes(db, id, "after_blob").inputStream()),
+                parseReceipts(readRecoveryBytes(db, id, "before_receipts").toString(Charsets.UTF_8)),
+                parseReceipts(readRecoveryBytes(db, id, "after_receipts").toString(Charsets.UTF_8)))
+        }
+        val current = readSnapshot(db)
+        var target = SnapshotUndo.prepare(stored.before, stored.after, current)
+        val receipts = SnapshotUndo.revertRows("导入记录", stored.beforeReceipts, stored.afterReceipts, readReceipts(db), ImportReceipt::id)
+        val old = stored.before.records.associateBy { it.id }; val after = stored.after.records.associateBy { it.id }
+        val restoring = old.keys.filterTo(mutableSetOf()) { old[it] != after[it] }
+        val serials = target.records.filter { it.id !in restoring && !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
+        val duplicates = mutableListOf<StockRecord>()
+        val audit = mutableListOf<ChangeLog>()
+        target = target.copy(records = target.records.map { record ->
+            if (record.id in restoring && !record.voided && record.kind == ItemKind.MACHINE && record.sn.isNotEmpty() && !serials.add(record.sn)) {
+                val now = maxOf(System.currentTimeMillis(), record.updatedAt)
+                val voided = record.copy(voided = true, updatedAt = now)
+                duplicates += voided
+                audit += ChangeLog(newId(), record.id, "VOID", recordJson(record), recordJson(voided), now)
+                voided
+            } else record
+        }, changes = target.changes)
+        target = target.copy(changes = target.changes + audit)
+        // Existing restore validation checks all references, names and audit data. The enclosing
+        // transaction rolls back the replacement if a later unrelated row prevents this undo.
+        listOf("changes", "records", "warehouses", "countries", "tasks").forEach { db.delete(it, null, null) }
+        restore(target)
+        db.delete("import_receipts", null, null)
+        receipts.forEach { insertReceipt(db, it) }
+        db.update("recovery_points", ContentValues().apply { put("undone", 1) }, "id = ?", arrayOf(id))
+        MutationResult((old.keys + after.keys).count { old[it] != after[it] }, duplicates)
+    }
+
+    private fun encodeSnapshot(snapshot: InventorySnapshot): ByteArray = ByteArrayOutputStream().also { InventoryFiles.writeBackup(snapshot, it) }.toByteArray()
+
+    /** Keep each CursorWindow row small even when a saved snapshot exceeds 2 MiB. */
+    private fun readRecoveryBytes(db: SQLiteDatabase, id: String, column: String): ByteArray {
+        val output = ByteArrayOutputStream()
+        var offset = 1
+        while (true) {
+            val chunk = db.rawQuery("SELECT substr(CAST($column AS BLOB), ?, 262144) FROM recovery_points WHERE id = ?", arrayOf(offset.toString(), id)).use { c ->
+                check(c.moveToFirst()); c.getBlob(0)
+            }
+            if (chunk.isEmpty()) break
+            output.write(chunk); offset += chunk.size
+        }
+        return output.toByteArray()
+    }
+
+    private fun readReceipts(db: SQLiteDatabase): List<ImportReceipt> = rows(db, "import_receipts", "at DESC, id DESC") { c ->
+        ImportReceipt(c.string("id"), c.string("fingerprint"), c.string("file_name"), c.string("warehouse_id"), c.string("warehouse_label"), c.long("at"), c.int("row_count"))
+    }
+
+    private fun insertReceipt(db: SQLiteDatabase, value: ImportReceipt) {
+        db.insertOrThrow("import_receipts", null, ContentValues().apply {
+            put("id", value.id); put("fingerprint", value.fingerprint); put("file_name", value.fileName)
+            put("warehouse_id", value.warehouseId); put("warehouse_label", value.warehouseLabel); put("at", value.at); put("row_count", value.rows)
+        })
+    }
+
+    private fun receiptsJson(values: List<ImportReceipt>): String = JSONArray().apply { values.forEach { v ->
+        put(JSONObject().put("id", v.id).put("fingerprint", v.fingerprint).put("fileName", v.fileName).put("warehouseId", v.warehouseId)
+            .put("warehouseLabel", v.warehouseLabel).put("at", v.at).put("rows", v.rows))
+    } }.toString()
+
+    private fun parseReceipts(text: String): List<ImportReceipt> = JSONArray(text).let { array -> (0 until array.length()).map { i ->
+        val v = array.getJSONObject(i)
+        ImportReceipt(v.getString("id"), v.getString("fingerprint"), v.getString("fileName"), v.getString("warehouseId"), v.getString("warehouseLabel"), v.getLong("at"), v.getInt("rows"))
+    } }
 
     @Synchronized
     fun addTask(name: String): InventoryTask {
@@ -186,9 +312,18 @@ class InventoryRepository(context: Context) : AutoCloseable {
     }
 
     @Synchronized
-    fun importRecords(inputs: List<RecordInput>, mode: DuplicateMode): MutationResult = transaction { db ->
+    fun importRecords(inputs: List<RecordInput>, mode: DuplicateMode, metadata: ImportMetadata? = null): MutationResult = transaction { db ->
         val duplicates = mutableListOf<StockRecord>()
         inputs.forEach { duplicates += incoming(db, it, mode).duplicateMachines }
+        if (metadata != null) {
+            require(inputs.isNotEmpty() && inputs.map { it.warehouseId }.distinct().size == 1) { "文件导入必须选择一个仓库" }
+            require(metadata.fingerprint.matches(Regex("[a-f0-9]{64}")) && metadata.fileName.length <= 200) { "导入文件信息无效" }
+            val warehouse = inputs.first().warehouseId
+            val label = db.rawQuery("SELECT c.name, w.name FROM warehouses w JOIN countries c ON c.id = w.country_id WHERE w.id = ?", arrayOf(warehouse)).use { c ->
+                check(c.moveToFirst()); "${c.getString(0)} / ${c.getString(1)}"
+            }
+            insertReceipt(db, ImportReceipt(newId(), metadata.fingerprint, metadata.fileName, warehouse, label, System.currentTimeMillis(), inputs.size))
+        }
         MutationResult(inputs.size, duplicates)
     }
 
@@ -224,6 +359,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id = ?)", arrayOf(id))
         val count = db.delete("records", "warehouse_id = ?", arrayOf(id))
         rewriteAuditWarehouses(db, setOf(id))
+        db.delete("import_receipts", "warehouse_id = ?", arrayOf(id))
         db.delete("warehouses", "id = ?", arrayOf(id))
         count
     }
@@ -237,6 +373,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id IN (SELECT id FROM warehouses WHERE country_id = ?))", arrayOf(id))
         val count = db.delete("records", "warehouse_id IN (SELECT id FROM warehouses WHERE country_id = ?)", arrayOf(id))
         rewriteAuditWarehouses(db, warehouses)
+        db.delete("import_receipts", "warehouse_id IN (SELECT id FROM warehouses WHERE country_id = ?)", arrayOf(id))
         db.delete("warehouses", "country_id = ?", arrayOf(id))
         db.delete("countries", "id = ?", arrayOf(id))
         count
@@ -271,6 +408,10 @@ class InventoryRepository(context: Context) : AutoCloseable {
             if (duplicate) duplicates += after
         }
         rewriteAuditWarehouses(db, setOf(sourceId), targetId)
+        val targetLabel = db.rawQuery("SELECT c.name, w.name FROM warehouses w JOIN countries c ON c.id = w.country_id WHERE w.id = ?", arrayOf(targetId)).use { c ->
+            check(c.moveToFirst()); "${c.getString(0)} / ${c.getString(1)}"
+        }
+        db.update("import_receipts", ContentValues().apply { put("warehouse_id", targetId); put("warehouse_label", targetLabel) }, "warehouse_id = ?", arrayOf(sourceId))
         db.delete("warehouses", "id = ?", arrayOf(sourceId))
         MutationResult(sources.size, duplicates)
     }
@@ -756,6 +897,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             db.execSQL("CREATE INDEX records_by_warehouse ON records(warehouse_id, voided)")
             db.execSQL("CREATE TABLE changes (id TEXT PRIMARY KEY NOT NULL, record_id TEXT NOT NULL REFERENCES records(id), action TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, at INTEGER NOT NULL)")
             db.execSQL("CREATE INDEX changes_by_record ON changes(record_id, at)")
+            createRecoveryTables(db)
             db.insertOrThrow("tasks", null, ContentValues().apply {
                 put("id", UUID.randomUUID().toString())
                 put("name", "首次盘点")
@@ -764,7 +906,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            require(oldVersion in 1..2 && newVersion == 3) { "未支持的数据库升级：$oldVersion → $newVersion" }
+            require(oldVersion in 1..3 && newVersion == 4) { "未支持的数据库升级：$oldVersion → $newVersion" }
+            if (oldVersion < 3) {
             // Preserve every old record. For serials previously repeated in different tasks,
             // keep the latest edited record active and audit the others as voided.
             db.execSQL("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL)")
@@ -792,12 +935,21 @@ class InventoryRepository(context: Context) : AutoCloseable {
             }
             db.execSQL(GLOBAL_SN_INDEX)
             db.execSQL("CREATE INDEX IF NOT EXISTS records_by_warehouse ON records(warehouse_id, voided)")
+            }
+            createRecoveryTables(db)
         }
+    }
+
+    private fun createRecoveryTables(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS import_receipts (id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, file_name TEXT NOT NULL, warehouse_id TEXT NOT NULL, warehouse_label TEXT NOT NULL, at INTEGER NOT NULL, row_count INTEGER NOT NULL)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS imports_by_fingerprint ON import_receipts(fingerprint, at)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS recovery_points (id TEXT PRIMARY KEY NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, record_count INTEGER NOT NULL, undone INTEGER NOT NULL, before_blob BLOB NOT NULL, after_blob BLOB NOT NULL, before_receipts TEXT NOT NULL, after_receipts TEXT NOT NULL, size_bytes INTEGER NOT NULL)")
     }
 
     companion object {
         const val DATABASE_NAME = "fieldstock.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
+        private const val MAX_RECOVERY_BYTES = 96L * 1024 * 1024
         private const val GLOBAL_SN_INDEX = "CREATE UNIQUE INDEX unique_active_sn ON records(sn) WHERE kind = 'MACHINE' AND voided = 0 AND sn != ''"
         private const val MIGRATION_NOTICE_KEY = "migration_voided_duplicates"
         private const val MAX_QUANTITY = 1_000_000_000

@@ -115,8 +115,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         val updateId = editingId
         vm.duplicateOnRestore = false
         val after = { clearForm(keepBom && input.kind == ItemKind.MACHINE && updateId == null) }
-        if (updateId == null) vm.performMutation("已保存", after = after) { it.saveIncoming(input, mode) }
-        else vm.perform("已保存修改", after = after) { it.save(input, updateId) }
+        if (updateId == null) vm.performMutation("已保存", after = after, notify = true) { it.saveIncoming(input, mode) }
+        else vm.perform("已保存修改", after = after, notify = true) { it.save(input, updateId) }
     }
     fun chooseWarehouse(id: String) {
         if (id != vm.warehouseId && dirty) switchWarehouse = id
@@ -147,7 +147,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     LaunchedEffect(vm.message) { if (vm.message != null) { delay(3000); vm.message = null } }
 
     if (!entered || vm.snapshot.warehouses.none { it.id == vm.warehouseId }) {
-        WarehouseChooser(vm, onEnter = ::chooseWarehouse, onRestore = ::restoreBackup)
+        WarehouseChooser(vm, onEnter = ::chooseWarehouse, onRestore = ::restoreBackup, onUndone = { clearForm(); keepBom = false })
     } else Scaffold(containerColor = Mist, topBar = { WarehouseHeader(vm.warehouseLabel(vm.warehouseId)) }, bottomBar = {
         if (!keyboardVisible) NavigationBar(containerColor = Color.White) {
             val icons = listOf(Icons.Default.Edit, Icons.Default.List, Icons.Default.Share, Icons.Default.Settings)
@@ -246,7 +246,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     onVoid = { confirmVoid = it }, onRestore = { record ->
                         if (record.kind == ItemKind.PART && record.bom.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.PART && it.warehouseId == record.warehouseId && it.bom == record.bom && it.condition == record.condition }) pendingRestore = record
                         else if (record.kind == ItemKind.MACHINE && record.sn.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.MACHINE && it.sn == record.sn }) pendingRestore = record
-                        else vm.performMutation("记录已还原") { it.restoreVoided(record.id) }
+                        else vm.restoreVoided(record.id)
                     }, onDelete = { confirmDelete = it },
                     onClear = { clearRecords = it; activeClearStep = 0 })
                 2 -> ProcessingPage(vm, onExport = { type ->
@@ -279,29 +279,29 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     }
     pendingRestore?.let { record ->
         if (record.kind == ItemKind.PART) DuplicateModeDialog("相同配件如何还原？", "${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom} · ${record.condition}\n还原数量：${record.quantity} 件。", { pendingRestore = null }) { mode ->
-            pendingRestore = null; vm.performMutation("记录已还原") { it.restoreVoided(record.id, mode) }
+            pendingRestore = null; vm.restoreVoided(record.id, mode)
         } else ConfirmDialog("SN 已存在，保持作废", "SN：${record.sn}\n已有正常整机占用这个 SN，本条记录将保留在作废页。", "确认保留作废", { pendingRestore = null }) {
-            pendingRestore = null; vm.performMutation("重复记录保留作废") { it.restoreVoided(record.id) }
+            pendingRestore = null; vm.restoreVoided(record.id)
         }
     }
     confirmVoid?.let { record -> ConfirmDialog("作废这条记录？", "${record.bom}\n${record.sn}\n作废后不再计数，可以在作废页还原。", "确认作废", { confirmVoid = null }) {
         confirmVoid = null; vm.perform("记录已作废") { it.voidRecord(record.id) }
     } }
-    confirmDelete?.let { record -> ConfirmDialog("永久删除这条作废记录？", "${record.bom}\n${record.sn}\n删除后不能在作废页还原。", "确认删除", { confirmDelete = null }) {
-        confirmDelete = null; vm.perform("作废记录已删除") { it.deleteVoided(record.id) }
+    confirmDelete?.let { record -> ConfirmDialog("删除这条作废记录？", "${record.bom}\n${record.sn}\n删除后不在作废页保留，可在设置的最近恢复点撤销。", "确认删除", { confirmDelete = null }) {
+        confirmDelete = null; vm.perform("作废记录已删除", recoveryLabel = "删除作废记录：${vm.warehouseLabel(record.warehouseId)} / ${record.bom}") { it.deleteVoided(record.id) }
     } }
     clearRecords?.let { category ->
         val isVoid = category == "voided"
         val count = vm.snapshot.records.count { it.warehouseId == vm.warehouseId && it.voided == isVoid }
         val second = !isVoid && activeClearStep == 1
         ConfirmDialog(if (isVoid) "清除本仓作废记录？" else if (second) "再次确认清空正常记录" else "清空本仓正常记录？",
-            "${vm.warehouseLabel(vm.warehouseId)}\n共 $count 条${if (isVoid) "作废" else "非作废"}记录，将永久删除，不受搜索和筛选影响。${if (!isVoid) "\n作废记录和其他仓库不受影响。" else "\n正常记录和其他仓库不受影响。"}",
+            "${vm.warehouseLabel(vm.warehouseId)}\n共 $count 条${if (isVoid) "作废" else "非作废"}记录，将从本仓记录删除，不受搜索和筛选影响。操作前自动保留本机恢复点。${if (!isVoid) "\n作废记录和其他仓库不受影响。" else "\n正常记录和其他仓库不受影响。"}",
             if (isVoid) "确认清除" else if (second) "确认清空正常" else "继续清空", { clearRecords = null; activeClearStep = 0 }) {
             if (!isVoid && !second) activeClearStep = 1
             else {
                 val warehouse = vm.warehouseId; clearRecords = null; activeClearStep = 0
-                if (isVoid) vm.perform("本仓作废记录已清除") { it.clearVoided(warehouse) }
-                else vm.perform("本仓正常记录已清空") { it.clearActive(warehouse) }
+                if (isVoid) vm.perform("本仓作废记录已清除", recoveryLabel = "清除作废：${vm.warehouseLabel(warehouse)}") { it.clearVoided(warehouse) }
+                else vm.perform("本仓正常记录已清空", recoveryLabel = "清空正常：${vm.warehouseLabel(warehouse)}") { it.clearActive(warehouse) }
             }
         }
     }

@@ -1,0 +1,9 @@
+2026-10-20 Android11/API30 AOSP, emulator-5556, 360x640dp, airplane mode, no Google Play services.
+PASS: installed 0.2.1 Release and entered UPG0022 quantity 5.
+PASS: same-signature cover installation to final 0.2.2 Release preserved UPG0022 quantity 5 and warehouse.
+PASS: actual OpenDocument CSV read; preview showed +3 parts, +1 active machine, 1 duplicate quarantine, expected parts total 8.
+PASS: committed import and added unrelated KEEP22 quantity 2.
+PASS: selected the CSV recovery point in Settings and confirmed undo; point marked undone.
+PASS: actual CreateDocument JSON export readback has exactly UPG0022 quantity 5 and KEEP22 quantity 2, both active parts; imported machines removed.
+PASS: exported JSON SHA256 verified.
+LIMIT: physical phone camera, speaker and vibration motor are not connected; see real-phone checklist.
