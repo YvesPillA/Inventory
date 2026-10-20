@@ -2,6 +2,10 @@ package com.fieldstock.app
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.net.Uri
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -11,9 +15,14 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.backup.AutomaticBackups
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.scan.ScanActivity
+import com.fieldstock.app.scan.CodeBox
+import com.fieldstock.app.scan.LiveTextLine
 import com.fieldstock.app.model.ItemKind
 import com.fieldstock.app.model.RecordInput
 import com.fieldstock.app.model.StockRecord
@@ -606,5 +615,72 @@ class ManualWorkflowTest {
         assertEquals(5, data.records.single().quantity)
         assertEquals(2, count())
         output.delete()
+    }
+
+    private fun provideLiveLabels(field: String, codes: List<String>) {
+        var scanner: ScanActivity? = null
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        compose.waitUntil(10_000) {
+            instrumentation.runOnMainSync {
+                scanner = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).filterIsInstance<ScanActivity>().singleOrNull()
+            }
+            scanner != null
+        }
+        val crop = Bitmap.createBitmap(634, 380, Bitmap.Config.ARGB_8888)
+        val scene = Bitmap.createBitmap(720, 500, Bitmap.Config.ARGB_8888)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; textSize = 36f; typeface = Typeface.MONOSPACE }
+        Canvas(crop).apply {
+            drawColor(Color.WHITE)
+            codes.forEachIndexed { index, code -> drawText("$field: $code", 24f, 75f + index * 114f, paint) }
+        }
+        Canvas(scene).apply { drawColor(Color.DKGRAY); drawBitmap(crop, 43f, 60f, null) }
+        val lines = codes.mapIndexed { index, code ->
+            LiveTextLine("$field: $code", CodeBox(0.04f, 0.1f + index * 0.25f, 0.9f, 0.2f + index * 0.25f))
+        }
+        instrumentation.runOnMainSync {
+            scanner!!.changeScanMode(true)
+            repeat(2) { scanner!!.publishLiveRecognition(scene, crop, codes.joinToString("\n") { "$field: $it" }, lines) }
+            scanner!!.pauseOrResumeLive()
+        }
+        compose.waitUntil(10_000) { compose.onAllNodesWithContentDescription("画面编号 2 ${codes[1]}").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun continuousBomSelectionReturnsToFormAndOnlySaveCreatesInventory() {
+        launchAndEnterWarehouse()
+        compose.onNodeWithText("扫描 BOM").performClick()
+        provideLiveLabels("BOM", listOf("000123A", "000456B", "000789C"))
+        assertEquals(0, count())
+        compose.onNodeWithContentDescription("画面编号 2 000456B").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("最终 BOM 编号").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(0, count())
+        compose.onNodeWithText("确认并填入").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("保存这一条").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals("000456B", compose.onNodeWithText("BOM").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        enter("数量（件）", "7"); save()
+        compose.waitUntil(10_000) { count() == 1 }
+        assertEquals("000456B", records().single().bom)
+        assertEquals(7, records().single().quantity)
+        assertEquals("ocr", records().single().sourceBom)
+    }
+
+    @Test fun continuousSnSelectionFillsBothSegmentsAndKeepsTheEnteredBom() {
+        launchAndEnterWarehouse()
+        compose.onNodeWithText("整机").performClick()
+        enter("BOM", "MODEL024")
+        compose.onNodeWithText("扫描 SN").performClick()
+        provideLiveLabels("SN", listOf("AA-001", "ABCDEFG-1234567", "ZZ-009"))
+        compose.onNodeWithContentDescription("画面编号 2 ABCDEFG-1234567").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("最终 SN 编号").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(0, count())
+        compose.onNodeWithText("确认并填入").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 前段").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals("MODEL024", compose.onNodeWithText("BOM").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        assertEquals("ABCDEFG", compose.onNodeWithText("SN 前段").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        assertEquals("1234567", compose.onNodeWithText("SN 后段").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        save()
+        compose.waitUntil(10_000) { count() == 1 }
+        assertEquals("ABCDEFG-1234567", records().single().sn)
+        assertEquals("MODEL024", records().single().bom)
+        assertEquals("ocr", records().single().sourceSn)
     }
 }

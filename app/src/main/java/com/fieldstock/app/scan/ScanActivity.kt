@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -50,6 +51,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +84,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 
 /**
  * On-device label OCR. Launch with extra "field" = "BOM" or "SN".
@@ -113,7 +116,18 @@ class ScanActivity : ComponentActivity() {
     private var cameraGeneration = 0
     private var recognitionGeneration = 0
     private var activityAlive = true
-    private var activityForeground = false
+    private var activityForeground by mutableStateOf(false)
+    private var continuous by mutableStateOf(false)
+    private var livePaused by mutableStateOf(false)
+    private var liveFrame by mutableStateOf<LiveScanFrame?>(null)
+    private val liveTracker = LiveCodeTracker()
+    internal var processingFrame by mutableStateOf(false); private set
+    private var liveOperation = 0L
+    private var lastLiveStart = 0L
+    internal var liveRevision = 0L; private set
+    private val currentRoi: CodeBox get() = if (continuous) LIVE_ROI else SINGLE_ROI
+    internal val visibleLiveCodes: List<TrackedCode> get() =
+        liveFrame?.codes.orEmpty().filter { livePaused || it.stable }
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasPermission = granted
@@ -123,6 +137,8 @@ class ScanActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         field = if (intent.getStringExtra(EXTRA_FIELD).equals("SN", ignoreCase = true)) IdentifierField.SN else IdentifierField.BOM
+        continuous = savedInstanceState?.getBoolean("continuous")
+            ?: getSharedPreferences("fieldstock", 0).getBoolean("continuous_scan", false)
         hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         reviewImages.clearExpired()
         if (savedInstanceState?.getBoolean("showResult") == true) {
@@ -157,6 +173,7 @@ class ScanActivity : ComponentActivity() {
         outState.putString("editedValue", editedValue)
         outState.putString("selectedValue", selectedCandidate?.value)
         outState.putString("reviewImageId", reviewImageId)
+        outState.putBoolean("continuous", continuous)
         super.onSaveInstanceState(outState)
     }
 
@@ -176,7 +193,7 @@ class ScanActivity : ComponentActivity() {
         }
         torchEnabled = false
         // An in-flight result must not replace the screen after leaving the scanner.
-        recognitionGeneration++
+        clearLive()
         busy = false
         super.onStop()
     }
@@ -194,6 +211,19 @@ class ScanActivity : ComponentActivity() {
 
     @Composable
     private fun ScannerScreen() {
+        LaunchedEffect(continuous, activityForeground, hasPermission, cameraReady, showResult, livePaused) {
+            if (continuous && activityForeground && hasPermission && cameraReady && !showResult && !livePaused) {
+                while (true) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (liveFrame?.let { now - it.capturedAt > LIVE_FRESH_MS } == true) {
+                        liveFrame = null
+                        liveTracker.reset()
+                    }
+                    if (!busy && !processingFrame && now - lastLiveStart >= 500L) recognizeLiveFrame()
+                    delay(100L)
+                }
+            }
+        }
         Scaffold(
             modifier = Modifier.fillMaxSize().systemBarsPadding().imePadding(),
             topBar = {
@@ -210,11 +240,22 @@ class ScanActivity : ComponentActivity() {
                             }
                         }
                         HorizontalDivider(color = Color(0xFFE0E7F0))
+                        if (!showResult) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!continuous) Button(onClick = { changeScanMode(false) }, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("单次识别") }
+                            else OutlinedButton(onClick = { changeScanMode(false) }, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("单次识别") }
+                            if (continuous) Button(onClick = { changeScanMode(true) }, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("持续识别") }
+                            else OutlinedButton(onClick = { changeScanMode(true) }, enabled = !busy,
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("持续识别") }
+                        }
                     }
                 }
             },
             bottomBar = {
-                if (hasPermission || showResult) {
+                if (hasPermission || showResult || liveFrame != null) {
                     Surface(color = Color.White, shadowElevation = 4.dp) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (showResult) ResultActions() else CameraActions()
@@ -225,7 +266,7 @@ class ScanActivity : ComponentActivity() {
         ) { padding ->
             when {
                 showResult -> ReviewResult(Modifier.padding(padding))
-                !hasPermission -> PermissionScreen(Modifier.padding(padding))
+                !hasPermission && liveFrame == null -> PermissionScreen(Modifier.padding(padding))
                 else -> CameraStage(Modifier.padding(padding))
             }
         }
@@ -265,7 +306,7 @@ class ScanActivity : ComponentActivity() {
         DisposableEffect(Unit) { onDispose { unbindCamera() } }
         Column(modifier.fillMaxSize()) {
             Box(Modifier.fillMaxWidth().weight(1f).background(Color(0xFF122338))) {
-                AndroidView(
+                if (hasPermission) AndroidView(
                     factory = { context ->
                         PreviewView(context).apply {
                             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -276,8 +317,14 @@ class ScanActivity : ComponentActivity() {
                     },
                     modifier = Modifier.fillMaxSize(),
                 )
+                val frozen = liveFrame
+                if (frozen != null && (livePaused || !hasPermission)) {
+                    Image(frozen.scene.asImageBitmap(), contentDescription = "已暂停的扫描画面",
+                        contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
+                }
                 Viewfinder(Modifier.fillMaxSize())
-                Text(
+                if (continuous && frozen != null) LiveScanOverlay(visibleLiveCodes, frozen.roi, !busy, ::chooseLiveCode)
+                if (!continuous) Text(
                     "将 ${field.name} 一整行放入框内",
                     color = Color.White,
                     fontWeight = FontWeight.Medium,
@@ -293,13 +340,16 @@ class ScanActivity : ComponentActivity() {
                     }
                 }
             }
-            Column(Modifier.fillMaxWidth().background(Color(0xFFF4F7FC)).padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Text(
+            if (continuous) LiveCodeList(visibleLiveCodes, livePaused, !busy, ::chooseLiveCode)
+            Column(Modifier.fillMaxWidth().background(Color(0xFFF4F7FC)).padding(horizontal = 16.dp, vertical = if (continuous) 4.dp else 12.dp)) {
+                if (!continuous) {
+                  Text(
                     if (field == IdentifierField.SN) "SN 含一个 -，字母和数字合计最多 14 位。"
                     else "BOM 支持数字和英文字母，最多 14 位。",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                  )
+                }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp)) }
             }
         }
@@ -308,10 +358,11 @@ class ScanActivity : ComponentActivity() {
     @Composable
     private fun Viewfinder(modifier: Modifier) {
         Canvas(modifier) {
-            val left = size.width * ROI_LEFT
-            val top = size.height * ROI_TOP
-            val right = size.width * ROI_RIGHT
-            val bottom = size.height * ROI_BOTTOM
+            val roi = currentRoi
+            val left = size.width * roi.left
+            val top = size.height * roi.top
+            val right = size.width * roi.right
+            val bottom = size.height * roi.bottom
             val shade = Color.Black.copy(alpha = 0.48f)
             drawRect(shade, Offset.Zero, Size(size.width, top))
             drawRect(shade, Offset(0f, bottom), Size(size.width, size.height - bottom))
@@ -348,12 +399,12 @@ class ScanActivity : ComponentActivity() {
                 modifier = Modifier.weight(1f).heightIn(min = 52.dp),
             ) { Text(if (cameraReady && !torchAvailable) "无补光灯" else if (torchEnabled) "关闭补光" else "打开补光") }
             Button(
-                onClick = { recognizeFrame() },
-                enabled = cameraReady && !busy,
+                onClick = { if (continuous) pauseOrResumeLive() else recognizeFrame() },
+                enabled = !busy && if (continuous) liveFrame != null else cameraReady && !processingFrame,
                 modifier = Modifier.weight(1.6f).heightIn(min = 52.dp),
-            ) { Text(if (busy) "识别中…" else "识别框内编号", fontWeight = FontWeight.Bold) }
+            ) { Text(if (busy) "正在打开核对…" else if (continuous) if (livePaused) "继续识别" else "暂停画面" else "识别框内编号", fontWeight = FontWeight.Bold) }
         }
-        TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回手动输入") }
+        if (!continuous) TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回手动输入") }
     }
 
     @Composable
@@ -441,7 +492,7 @@ class ScanActivity : ComponentActivity() {
     }
 
     private fun rescan() {
-        recognitionGeneration++
+        clearLive()
         busy = false
         error = null
         showResult = false
@@ -451,6 +502,127 @@ class ScanActivity : ComponentActivity() {
         hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (!hasPermission) permissionDenied = true
     }
+
+    internal fun changeScanMode(live: Boolean) {
+        if (busy) return
+        clearLive()
+        continuous = live
+        error = null
+        getSharedPreferences("fieldstock", 0).edit().putBoolean("continuous_scan", live).apply()
+    }
+
+    private fun clearLive() {
+        recognitionGeneration++
+        liveOperation++
+        livePaused = false
+        liveFrame = null
+        liveTracker.reset()
+        lastLiveStart = 0L
+    }
+
+    internal fun pauseOrResumeLive() {
+        val frame = liveFrame ?: return
+        if (livePaused) {
+            clearLive()
+            error = null
+        } else if (SystemClock.elapsedRealtime() - frame.capturedAt <= LIVE_FRESH_MS) {
+            recognitionGeneration++
+            liveOperation++
+            livePaused = true
+            error = null
+        } else {
+            clearLive()
+            error = "画面已更新，请停稳后再暂停"
+        }
+    }
+
+    internal fun publishLiveRecognition(scene: Bitmap, crop: Bitmap, text: String, lines: List<LiveTextLine>,
+        roi: CodeBox = LIVE_ROI, capturedAt: Long = SystemClock.elapsedRealtime()) {
+        liveFrame = LiveScanFrame(scene, crop, text, roi, liveTracker.update(LiveOcr.locate(lines, field)), capturedAt)
+        liveRevision++
+        if (SystemClock.elapsedRealtime() - capturedAt > LIVE_FRESH_MS) {
+            livePaused = true
+            error = "本次识别较慢，已暂停画面；可点选编号或继续识别"
+        } else error = null
+    }
+
+    private fun recognizeLiveFrame() {
+        if (!continuous || livePaused || busy || processingFrame || showResult || !activityForeground || !cameraReady) return
+        lastLiveStart = SystemClock.elapsedRealtime()
+        if (previewView?.previewStreamState?.value != PreviewView.StreamState.STREAMING) return
+        val preview = previewView?.bitmap ?: return
+        if (preview.width < 2 || preview.height < 2) { preview.recycle(); return }
+        val factor = minOf(1f, 1280f / maxOf(preview.width, preview.height))
+        val scene = if (factor < 1f) Bitmap.createScaledBitmap(preview, (preview.width * factor).roundToInt().coerceAtLeast(2),
+            (preview.height * factor).roundToInt().coerceAtLeast(2), true).also { if (it !== preview) preview.recycle() } else preview
+        val roi = LIVE_ROI
+        val crop = cropFrame(scene, roi)
+        if (crop == null) { scene.recycle(); return }
+        val capturedAt = lastLiveStart
+        val generation = recognitionGeneration
+        val operation = ++liveOperation
+        processingFrame = true
+        var retained = false
+        try {
+            val activeRecognizer = recognizer ?: TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).also { recognizer = it }
+            activeRecognizer.process(InputImage.fromBitmap(crop, 0))
+                .addOnSuccessListener { result ->
+                    if (!activityAlive || !activityForeground || generation != recognitionGeneration ||
+                        operation != liveOperation || !continuous || livePaused || showResult) return@addOnSuccessListener
+                    publishLiveRecognition(scene, crop, result.text, result.locatedLines(crop.width, crop.height), roi, capturedAt)
+                    retained = true
+                }
+                .addOnFailureListener {
+                    if (activityAlive && generation == recognitionGeneration && operation == liveOperation) {
+                        liveFrame = null
+                        liveTracker.reset()
+                        error = "持续识别暂未成功，请调整光线、停稳后重试"
+                    }
+                }
+                .addOnCompleteListener {
+                    processingFrame = false
+                    if (!retained) { if (!crop.isRecycled) crop.recycle(); if (!scene.isRecycled) scene.recycle() }
+                }
+        } catch (_: Exception) {
+            processingFrame = false
+            crop.recycle(); scene.recycle()
+            error = "持续识别暂不可用，可切换单次识别或手动输入"
+        }
+    }
+
+    internal fun chooseLiveCode(hit: TrackedCode) {
+        if (busy) return
+        val frame = liveFrame ?: return
+        val current = visibleLiveCodes.find { it.id == hit.id && it.code.candidate.value == hit.code.candidate.value }
+        if (current == null || (!livePaused && SystemClock.elapsedRealtime() - frame.capturedAt > LIVE_FRESH_MS)) {
+            error = "这个编号已移出画面，请重新点选，或先暂停画面"
+            return
+        }
+        livePaused = true
+        recognitionGeneration++
+        liveOperation++
+        val generation = recognitionGeneration
+        busy = true
+        val picture = frame.crop.copy(Bitmap.Config.ARGB_8888, false)
+        lifecycleScope.launch {
+            try {
+                val saved = withContext(Dispatchers.IO) { runCatching { reviewImages.save(picture) }.getOrNull() }
+                val photo = withContext(Dispatchers.IO) { reviewImages.load(saved) }
+                if (!activityAlive || generation != recognitionGeneration) { reviewImages.delete(saved); return@launch }
+                reviewRecognition(frame.raw, saved, photo)
+                selectedCandidate = candidates.firstOrNull { it.value == current.code.candidate.value }
+                editedValue = current.code.candidate.value
+            } finally { picture.recycle() }
+        }
+    }
+
+    private fun cropFrame(scene: Bitmap, roi: CodeBox): Bitmap? = runCatching {
+        val left = (scene.width * roi.left).roundToInt().coerceIn(0, scene.width - 1)
+        val top = (scene.height * roi.top).roundToInt().coerceIn(0, scene.height - 1)
+        val right = (scene.width * roi.right).roundToInt().coerceIn(left + 1, scene.width)
+        val bottom = (scene.height * roi.bottom).roundToInt().coerceIn(top + 1, scene.height)
+        Bitmap.createBitmap(scene, left, top, right - left, bottom - top)
+    }.getOrNull()
 
     private fun bindCamera(view: PreviewView) {
         val generation = ++cameraGeneration
@@ -512,17 +684,17 @@ class ScanActivity : ComponentActivity() {
     }
 
     private fun recognizeFrame() {
-        if (busy || showResult || !cameraReady) return
+        if (busy || processingFrame || showResult || !cameraReady) return
         val snapshot = previewView?.bitmap
         if (snapshot == null || snapshot.width < 2 || snapshot.height < 2) {
             error = "相机画面尚未就绪，请稍后再次点击识别。"
             return
         }
         val crop = try {
-            val left = (snapshot.width * ROI_LEFT).roundToInt().coerceIn(0, snapshot.width - 1)
-            val top = (snapshot.height * ROI_TOP).roundToInt().coerceIn(0, snapshot.height - 1)
-            val right = (snapshot.width * ROI_RIGHT).roundToInt().coerceIn(left + 1, snapshot.width)
-            val bottom = (snapshot.height * ROI_BOTTOM).roundToInt().coerceIn(top + 1, snapshot.height)
+            val left = (snapshot.width * SINGLE_ROI.left).roundToInt().coerceIn(0, snapshot.width - 1)
+            val top = (snapshot.height * SINGLE_ROI.top).roundToInt().coerceIn(0, snapshot.height - 1)
+            val right = (snapshot.width * SINGLE_ROI.right).roundToInt().coerceIn(left + 1, snapshot.width)
+            val bottom = (snapshot.height * SINGLE_ROI.bottom).roundToInt().coerceIn(top + 1, snapshot.height)
             Bitmap.createBitmap(snapshot, left, top, right - left, bottom - top)
         } catch (_: Exception) {
             snapshot.recycle()
@@ -532,6 +704,7 @@ class ScanActivity : ComponentActivity() {
         if (crop !== snapshot) snapshot.recycle()
         val generation = ++recognitionGeneration
         busy = true
+        processingFrame = true
         error = null
         try {
             val activeRecognizer = recognizer ?: TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).also { recognizer = it }
@@ -567,16 +740,18 @@ class ScanActivity : ComponentActivity() {
                     busy = false
                     error = "识别失败。请调整光线后重试，或返回手动输入。"
                 }
-                .addOnCompleteListener { if (!crop.isRecycled) crop.recycle() }
+                .addOnCompleteListener { processingFrame = false; if (!crop.isRecycled) crop.recycle() }
         } catch (_: Exception) {
             if (!crop.isRecycled) crop.recycle()
             busy = false
+            processingFrame = false
             error = "识别暂不可用，请重试或返回手动输入。"
         }
     }
 
     /** Shared by the recognition callback and device UI checks using generated labels. */
     internal fun reviewRecognition(text: String, imageId: String?, photo: Bitmap?) {
+        clearLive()
         if (imageId != reviewImageId) reviewImages.delete(reviewImageId)
         reviewImageId = imageId
         reviewPhoto = photo
@@ -592,10 +767,9 @@ class ScanActivity : ComponentActivity() {
         const val EXTRA_FIELD = "field"
         const val EXTRA_VALUE = "value"
         const val EXTRA_RAW = "raw"
-        private const val ROI_LEFT = 0.08f
-        private const val ROI_TOP = 0.36f
-        private const val ROI_RIGHT = 0.92f
-        private const val ROI_BOTTOM = 0.64f
+        internal val SINGLE_ROI = CodeBox(0.08f, 0.36f, 0.92f, 0.64f)
+        internal val LIVE_ROI = CodeBox(0.06f, 0.12f, 0.94f, 0.88f)
+        internal const val LIVE_FRESH_MS = 2_000L
     }
 }
 
