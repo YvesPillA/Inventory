@@ -14,6 +14,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -22,7 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.fieldstock.app.model.*
 
 @Composable
-internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit, onRestore: () -> Unit) {
+internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit, onRestore: () -> Unit, onUndone: () -> Unit = {}) {
     Surface(color = Mist, modifier = Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
           WarehouseHeader("盘库助手")
@@ -32,6 +34,7 @@ internal fun WarehouseChooser(vm: InventoryViewModel, onEnter: (String) -> Unit,
             Text("先选国家和仓库，再开始盘点。", color = Color(0xFF526775), fontSize = 14.sp)
             WarehousePicker(vm, "进入仓库", onEnter = onEnter)
             TextButton(onClick = onRestore, enabled = !vm.busy) { Text("从备份恢复") }
+            if (vm.recoveryPoints.isNotEmpty()) RecoveryAccess(vm, onUndone)
             vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
           }
@@ -126,9 +129,23 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
         OutlinedButton(onClick = { merging = true; mergeTarget = ""; mergeStep = 0 }, enabled = warehouse != null && vm.snapshot.warehouses.any { it.countryId == warehouse.countryId && it.id != warehouse.id } && !vm.busy,
             modifier = Modifier.fillMaxWidth()) { Text("合并当前仓库") }
         HorizontalDivider()
+        Text("保存反馈", style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("保存震动", Modifier.weight(1f)); Switch(vm.vibrationEnabled, vm::setVibration, enabled = !vm.busy, modifier = Modifier.semantics { contentDescription = "保存震动" })
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("提示声音", Modifier.weight(1f)); Switch(vm.soundEnabled, vm::setSound, enabled = !vm.busy, modifier = Modifier.semantics { contentDescription = "提示声音" })
+        }
+        Text("成功为短提示，重复 SN 为较长提示。声音默认关闭，遵循手机静音及通知音量。", fontSize = 13.sp, color = Petrol)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { vm.testFeedback(false) }, enabled = !vm.busy) { Text("试成功提示") }
+            TextButton(onClick = { vm.testFeedback(true) }, enabled = !vm.busy) { Text("试重复提示") }
+        }
+        HorizontalDivider()
+        RecoveryAccess(vm, onStructureChanged)
         OutlinedButton(onClick = onRestore, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text("从备份合并恢复") }
         Text("BOM：字母数字最多14位。\nSN：两段字母数字合计最多14位，横线自动补齐。\n前导零和大小写保留，SN在所有仓库中唯一。", fontSize = 14.sp, color = Color(0xFF526775))
-        Text("盘库助手 0.2.1 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
+        Text("盘库助手 0.2.2 · 单机离线版", fontSize = 12.sp, color = Color.Gray)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
     }
     rename?.let { request -> AlertDialog(onDismissRequest = { rename = null }, title = { Text("修改名称") },
@@ -143,9 +160,9 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
         val warehouseNames = vm.snapshot.warehouses.filter { it.id in ids }.joinToString("、") { it.name }.ifEmpty { "无仓库" }
         val count = vm.snapshot.records.count { it.warehouseId in ids }
         ConfirmDialog(if (deleteStep == 0) "删除${if (request.first == "country") "国家" else "仓库"}？" else "再次确认删除",
-            "国家：$countryName\n仓库：$warehouseNames\n将永久删除 $count 条记录（含作废）及修改历史，并删除${if (request.first == "country") "这个国家及其全部仓库" else "这个仓库"}。",
+            "国家：$countryName\n仓库：$warehouseNames\n将删除 $count 条记录（含作废）及修改历史，并删除${if (request.first == "country") "这个国家及其全部仓库" else "这个仓库"}。操作前自动保留本机恢复点，最近五次重要操作可撤销。",
             if (deleteStep == 0) "继续删除" else if (request.first == "country") "确认删除国家" else "确认删除仓库", { deleting = null; deleteStep = 0 }) {
-            if (deleteStep == 0) deleteStep = 1 else vm.perform("已删除", after = { deleting = null; deleteStep = 0; onStructureChanged() }) {
+            if (deleteStep == 0) deleteStep = 1 else vm.perform("已删除", recoveryLabel = "删除${if (request.first == "country") "国家" else "仓库"}：$countryName / $warehouseNames".take(512), after = { deleting = null; deleteStep = 0; onStructureChanged() }) {
                 if (request.first == "country") it.deleteCountry(request.second) else it.deleteWarehouse(request.second)
             }
         }
@@ -170,7 +187,7 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
         }, confirmButton = { TextButton(onClick = {
             if (mergeStep == 0) mergeStep = 1 else {
                 val source = warehouse.id; val destination = mergeTarget
-                vm.performMutation("仓库已合并", after = { merging = false; onStructureChanged(); onChoose(destination) }) { it.mergeWarehouses(source, destination, mergeMode) }
+                vm.performMutation("仓库已合并", recoveryLabel = "合并仓库：${country?.name} / ${warehouse.name} → ${target?.name}".take(512), after = { merging = false; onStructureChanged(); onChoose(destination) }) { it.mergeWarehouses(source, destination, mergeMode) }
             }
         }, enabled = target != null && !vm.busy) { Text(if (mergeStep == 0) "继续合并" else "确认合并仓库") } }, dismissButton = { TextButton(onClick = { merging = false }) { Text("取消") } })
     }
@@ -252,7 +269,7 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
             "${vm.warehouseLabel(vm.warehouseId)}\n共 ${picked.size} 条${if (action == "merge") "，BOM：${picked.firstOrNull()?.bom}，状态：${picked.firstOrNull()?.condition}，合计 ${picked.sumOf { it.quantity.toLong() }} 件" else "，作废后不再计数，可以还原"}。",
             if (action == "void") "确认批量作废" else "确认合并", { batchAction = null }) {
             val ids = selected; batchAction = null
-            vm.perform(if (action == "void") "所选记录已作废" else "所选配件已合并", after = { selected = emptySet(); selecting = false }) {
+            vm.perform(if (action == "void") "所选记录已作废" else "所选配件已合并", recoveryLabel = "${if (action == "void") "批量作废" else "合并配件"}：${vm.warehouseLabel(vm.warehouseId)}", after = { selected = emptySet(); selecting = false }) {
                 if (action == "void") it.voidRecords(ids) else it.mergeParts(ids)
             }
         }
@@ -285,23 +302,55 @@ internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, 
             else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("导入库存文件", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("使用 CSV 模板，BOM、SN 按文本填写以保留前导零。导入目标独立选择，不改变当前盘点仓库。", fontSize = 14.sp, color = Petrol)
+                Text("本机从 0.2.2 开始记录导入历史；旧版或其他手机导入过的文件仍需自行核对。", fontSize = 13.sp, color = Petrol)
                 OutlinedButton(onClick = onTemplate, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下载导入模板") }
                 Button(onClick = onImport, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("选择 CSV 文件") }
                 WarehousePicker(vm, "选择为导入目标", allowCreate = false) { targetWarehouse = it }
                 Text("导入目标：${vm.warehouseLabel(targetWarehouse)}", fontWeight = FontWeight.Medium)
                 DuplicateModePicker(mode) { mode = it }
                 vm.importRows?.let { rows ->
-                    Text("已读取 ${rows.size} 行，确认后导入所选仓库。", color = Teal)
-                    Button(onClick = { confirm = true }, enabled = rows.isNotEmpty() && vm.snapshot.warehouses.any { it.id == targetWarehouse } && !vm.busy,
+                    val preview = vm.importPreview(targetWarehouse, mode)
+                    Text("文件：${vm.importFileName}\n已读取 ${rows.size} 行，确认后导入所选仓库。", color = Teal)
+                    Text(preview.description(), fontSize = 14.sp)
+                    val repeated = vm.repeatImportNotice(targetWarehouse)
+                    if (repeated.isNotEmpty()) Text(repeated, color = Amber, fontSize = 13.sp)
+                    Button(onClick = { confirm = true }, enabled = rows.isNotEmpty() && preview.issue == null && !vm.busy,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("预览并确认导入") }
                 }
+                Text("需要退回整批操作时，可在设置中点“撤销重要操作”。", color = Petrol, fontSize = 13.sp)
                 vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
             }
         }
     }
-    if (confirm) ConfirmDialog("确认导入到此仓库？", "目标：${vm.warehouseLabel(targetWarehouse)}\n共 ${vm.importRows?.size ?: 0} 行。\n${if (mode == DuplicateMode.ADD_QUANTITY) "同 BOM、同状态配件添加到已有数量" else "配件新增条目"}。\n${vm.importDuplicateNotice()}\n重复 SN 整机将统一放入作废页，已有正常记录保持。", "确认导入", { confirm = false }) {
-        confirm = false; vm.applyImport(targetWarehouse, mode)
+    if (confirm) {
+        val repeated = vm.repeatImportNotice(targetWarehouse)
+        ConfirmDialog(if (repeated.isEmpty()) "确认导入到此仓库？" else "这个文件内容曾导入过", "目标：${vm.warehouseLabel(targetWarehouse)}\n文件：${vm.importFileName}\n${repeated}\n${vm.importPreview(targetWarehouse, mode).description()}\n${if (mode == DuplicateMode.ADD_QUANTITY) "同 BOM、同状态配件添加到已有数量" else "配件新增条目"}。\n${vm.importDuplicateNotice()}\n操作前自动保留本机恢复点。", if (repeated.isEmpty()) "确认导入" else "仍要重复导入", { confirm = false }) {
+            confirm = false; vm.applyImport(targetWarehouse, mode, allowRepeat = true)
+        }
     }
+}
+
+@Composable
+internal fun RecoveryAccess(vm: InventoryViewModel, onUndone: () -> Unit = {}) {
+    var opened by remember { mutableStateOf(false) }
+    var chosen by remember { mutableStateOf<RecoveryPoint?>(null) }
+    OutlinedButton(onClick = { opened = true }, enabled = vm.recoveryPoints.isNotEmpty() && !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("撤销重要操作") }
+    Text("导入、合并、删除和批量操作自动留恢复点，最多保留最近五次，容量较大时会提前清理旧点；仅在本机保存，不能替代导出备份。", fontSize = 13.sp, color = Petrol)
+    if (opened) AlertDialog(onDismissRequest = { opened = false }, title = { Text("最近的重要操作") }, text = {
+        Column(Modifier.heightIn(max = 330.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            vm.recoveryPoints.forEach { point ->
+                Column {
+                    Text(point.label, fontWeight = FontWeight.Medium)
+                    Text("${InventoryViewModel.formatHistoryTime(point.at)} · 涉及 ${point.records} 条库存", fontSize = 12.sp)
+                    TextButton(onClick = { opened = false; chosen = point }, enabled = !point.undone && !vm.busy) { Text(if (point.undone) "已撤销" else "撤销这次操作") }
+                }
+                HorizontalDivider()
+            }
+        }
+    }, confirmButton = { TextButton(onClick = { opened = false }) { Text("关闭") } })
+    chosen?.let { point -> ConfirmDialog("撤销这次操作？", "${point.label}\n${InventoryViewModel.formatHistoryTime(point.at)} · 涉及 ${point.records} 条库存\n只退回这次操作，后来新增的其他记录会保留。相关记录若后来改过，会停止撤销并提示。\n恢复整机时若 SN 已被其他记录占用，重复整机会保留在作废页。", "确认撤销", { chosen = null }) {
+        chosen = null; vm.undoRecovery(point, onUndone)
+    } }
 }
 
 @Composable

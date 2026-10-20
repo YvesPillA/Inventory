@@ -7,9 +7,9 @@ import zipfile
 root = Path(__file__).resolve().parent.parent
 artifacts = root / "artifacts"
 artifacts.mkdir(exist_ok=True)
-apk = artifacts / "盘库助手-0.2.1.apk"
+apk = artifacts / "盘库助手-0.2.2.apk"
 shutil.copy2(root / "app/build/outputs/apk/release/app-release.apk", apk)
-source = artifacts / "盘库助手-0.2.1-源码.zip"
+source = artifacts / "盘库助手-0.2.2-源码.zip"
 entries = [root / name for name in (
     "README.md", ".gitignore", "settings.gradle.kts", "build.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat", "app/build.gradle.kts"
 )]

@@ -13,6 +13,7 @@ import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.importdata.ImportRow
 import com.fieldstock.app.importdata.InventoryImport
+import com.fieldstock.app.importdata.ImportPreview
 import com.fieldstock.app.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -25,10 +26,12 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 data class PendingExport(val kind: String, val snapshot: InventorySnapshot, val taskId: String?, val warehouseId: String?)
+private data class LoadedInventory(val snapshot: InventorySnapshot, val migrated: Int, val receipts: List<ImportReceipt>, val recovery: List<RecoveryPoint>)
 
 class InventoryViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = InventoryRepository(application)
     private val preferences = application.getSharedPreferences("fieldstock", 0)
+    private val feedback = StockFeedback(application)
     private val operations = Mutex()
     private val exportCache = File(application.cacheDir, "pending-export.json")
     var snapshot by mutableStateOf(InventorySnapshot()); private set
@@ -42,6 +45,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var duplicateOnRestore by mutableStateOf(false)
     var duplicateSummary by mutableStateOf<List<StockRecord>>(emptyList())
     var importRows by mutableStateOf<List<ImportRow>?>(null)
+    var importFileName by mutableStateOf(""); private set
+    var importFingerprint by mutableStateOf(""); private set
+    var importReceipts by mutableStateOf<List<ImportReceipt>>(emptyList()); private set
+    var recoveryPoints by mutableStateOf<List<RecoveryPoint>>(emptyList()); private set
+    var vibrationEnabled by mutableStateOf(preferences.getBoolean("feedback_vibration", true)); private set
+    var soundEnabled by mutableStateOf(preferences.getBoolean("feedback_sound", false)); private set
     var migrationVoidedCount by mutableIntStateOf(0); private set
     var restoreCandidate by mutableStateOf<InventorySnapshot?>(null)
     var pendingExport: PendingExport? = null
@@ -55,23 +64,28 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         preferences.edit().remove("task").putString("warehouse", warehouse).apply()
     }
 
-    fun perform(success: String, after: () -> Unit = {}, work: (InventoryRepository) -> Unit) {
+    fun perform(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, work: (InventoryRepository) -> Unit) {
         if (busy) return
         busy = true
         viewModelScope.launch {
           operations.withLock {
             try {
-                val (fresh, migratedCount) = withContext(Dispatchers.IO) {
-                    work(repository)
-                    repository.snapshot() to repository.pendingMigrationVoidedCount()
+                val loaded = withContext(Dispatchers.IO) {
+                    if (recoveryLabel == null) work(repository) else repository.recoverable(recoveryLabel, work)
+                    LoadedInventory(repository.snapshot(), repository.pendingMigrationVoidedCount(), repository.importReceipts(), repository.recoveryPoints())
                 }
+                val fresh = loaded.snapshot
                 snapshot = fresh
-                migrationVoidedCount = migratedCount
+                migrationVoidedCount = loaded.migrated
+                importReceipts = loaded.receipts
+                recoveryPoints = loaded.recovery
                 select(warehouseId.takeIf { id -> fresh.warehouses.any { it.id == id } } ?: fresh.warehouses.firstOrNull()?.id.orEmpty())
                 if (success.isNotEmpty()) message = success
                 after()
+                if (notify) testFeedback(false)
             } catch (e: DuplicateSnException) {
                 duplicate = e.existing
+                if (notify) testFeedback(true)
             } catch (e: Exception) {
                 error = e.message ?: "操作未完成，请重试"
             } finally { busy = false }
@@ -79,17 +93,27 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun performMutation(success: String, after: () -> Unit = {}, work: (InventoryRepository) -> MutationResult) {
+    fun performMutation(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, work: (InventoryRepository) -> MutationResult) {
         var result = MutationResult(0)
-        perform(success, after = { duplicateSummary = result.duplicateMachines; after() }) { result = work(it) }
+        perform(success, after = {
+            duplicateSummary = result.duplicateMachines
+            if (notify) testFeedback(result.duplicateMachines.isNotEmpty())
+            after()
+        }, recoveryLabel = recoveryLabel) { result = work(it) }
     }
 
+    fun setVibration(enabled: Boolean) { vibrationEnabled = enabled; preferences.edit().putBoolean("feedback_vibration", enabled).apply() }
+    fun setSound(enabled: Boolean) { soundEnabled = enabled; preferences.edit().putBoolean("feedback_sound", enabled).apply() }
+    fun testFeedback(duplicate: Boolean) = feedback.play(duplicate, vibrationEnabled, soundEnabled)
+    fun undoRecovery(point: RecoveryPoint, after: () -> Unit = {}) { performMutation("已撤销：${point.label}", after = after, notify = true) { it.undoRecovery(point.id) } }
+
     fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
-        performMutation("还原处理完成") { it.restoreVoided(id, mode) }
+        val record = snapshot.records.find { it.id == id }
+        performMutation("还原处理完成", recoveryLabel = "还原作废记录：${record?.let { warehouseLabel(it.warehouseId) + " / " + it.bom } ?: id}", notify = true) { it.restoreVoided(id, mode) }
     }
 
     fun restoreBackup(candidate: InventorySnapshot) {
-        performMutation("备份已合并") { repository ->
+        performMutation("备份已合并", recoveryLabel = "合并 JSON 备份", notify = true) { repository ->
             val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
             val count = repository.restore(candidate)
             val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
@@ -183,16 +207,17 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         busy = true
         viewModelScope.launch {
             try {
-                val rows = withContext(Dispatchers.IO) {
+                val loaded = withContext(Dispatchers.IO) {
                     val resolver = getApplication<Application>().contentResolver
-                    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    val name = runCatching { resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                         if (cursor.moveToFirst()) cursor.getString(0) else null
-                    }
-                    resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error("无法打开导入文件")
+                    } }.getOrNull()?.filterNot(Char::isISOControl)?.take(200)?.ifBlank { null } ?: uri.lastPathSegment?.take(200) ?: "CSV 文件"
+                    val rows = resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error("无法打开导入文件")
+                    Triple(rows, name, InventoryImport.fingerprint(rows))
                 }
-                importRows = rows
-                message = "已读取 ${rows.size} 条，请选择目标仓库并确认导入"
-            } catch (e: Exception) { importRows = null; error = "导入文件未读取：${e.message}" }
+                importRows = loaded.first; importFileName = loaded.second; importFingerprint = loaded.third
+                message = "已读取 ${loaded.first.size} 条，请选择目标仓库并确认导入"
+            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; error = "导入文件未读取：${e.message}" }
             finally { busy = false }
         }
     }
@@ -204,12 +229,28 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             duplicates.groupingBy { "BOM ${it.bom} / SN ${it.sn}" }.eachCount().entries.joinToString("\n") { "${it.key} ×${it.value}" }
     }
 
-    fun applyImport(warehouse: String, mode: DuplicateMode) {
+    fun repeatImportNotice(warehouse: String): String {
+        val matches = importReceipts.filter { it.fingerprint == importFingerprint }
+        if (matches.isEmpty()) return ""
+        val sameTarget = matches.count { it.warehouseId == warehouse }
+        return "相同内容的文件曾导入 ${matches.size} 次，其中本仓 $sameTarget 次。再次导入会再次增加数量。\n" +
+            matches.take(5).joinToString("\n") { "${formatHistoryTime(it.at)} · ${it.warehouseLabel} · ${it.rows} 行（${it.fileName}）" }
+    }
+
+    fun importPreview(warehouse: String, mode: DuplicateMode) = ImportPreview.calculate(snapshot, importRows.orEmpty(), warehouse, mode)
+
+    fun applyImport(warehouse: String, mode: DuplicateMode, allowRepeat: Boolean = false) {
         val rows = importRows ?: return
+        if (rows.isEmpty()) { error = "文件只有表头，没有可导入数据"; return }
+        val issue = importPreview(warehouse, mode).issue
+        if (issue != null) { error = issue; return }
+        if (!allowRepeat && repeatImportNotice(warehouse).isNotEmpty()) { error = "此文件内容已导入，请先预览，再确认是否仍要重复导入"; return }
         val task = storageTaskId
-        performMutation("导入完成", after = { importRows = null }) { repository ->
+        val metadata = ImportMetadata(importFingerprint.ifEmpty { InventoryImport.fingerprint(rows) }, importFileName.ifEmpty { "CSV 文件" })
+        performMutation("导入完成", after = { importRows = null; importFileName = ""; importFingerprint = "" },
+            recoveryLabel = "导入 ${metadata.fileName} → ${warehouseLabel(warehouse)}".take(512), notify = true) { repository ->
             repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
-                sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual") }, mode)
+                sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual") }, mode, metadata)
         }
     }
 
@@ -226,9 +267,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         return "${snapshot.countries.find { it.id == warehouse.countryId }?.name.orEmpty()} / ${warehouse.name}"
     }
 
-    override fun onCleared() { repository.close(); super.onCleared() }
+    override fun onCleared() { feedback.close(); repository.close(); super.onCleared() }
 
     companion object {
         fun formatTime(at: Long): String = DateTimeFormatter.ofPattern("MM-dd HH:mm").format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
+        fun formatHistoryTime(at: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
     }
 }

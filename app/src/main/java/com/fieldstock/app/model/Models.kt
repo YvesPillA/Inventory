@@ -14,6 +14,10 @@ data class StockRecord(
 )
 data class ChangeLog(val id: String, val recordId: String, val action: String, val before: String, val after: String, val at: Long)
 data class MutationResult(val processed: Int, val duplicateMachines: List<StockRecord> = emptyList())
+data class ImportMetadata(val fingerprint: String, val fileName: String)
+data class ImportReceipt(val id: String, val fingerprint: String, val fileName: String,
+    val warehouseId: String, val warehouseLabel: String, val at: Long, val rows: Int)
+data class RecoveryPoint(val id: String, val label: String, val at: Long, val records: Int, val undone: Boolean)
 data class InventorySnapshot(
     val tasks: List<InventoryTask> = emptyList(), val countries: List<Country> = emptyList(),
     val warehouses: List<Warehouse> = emptyList(), val records: List<StockRecord> = emptyList(),

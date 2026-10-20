@@ -11,6 +11,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.model.DuplicateSnException
+import com.fieldstock.app.model.DuplicateMode
 import com.fieldstock.app.model.InventorySnapshot
 import com.fieldstock.app.model.ItemKind
 import com.fieldstock.app.model.RecordInput
@@ -237,6 +238,40 @@ class RepositoryInstrumentedTest {
         repository.close()
         repository = InventoryRepository(context)
         assertEquals(0, repository.pendingMigrationVoidedCount())
+    }
+
+    @Test fun recoveryLargerThanCursorWindowSurvivesRestartAndRestoresExactInventory() {
+        val task = repository.snapshot().tasks.single()
+        val warehouse = repository.addWarehouse(repository.addCountry("恢复国").id, "恢复仓")
+        repository.importRecords(List(300) { i -> RecordInput(task.id, warehouse.id, ItemKind.PART, "P$i", "", 1, "正常", "恢复验证".repeat(800)) }, DuplicateMode.NEW_ENTRY)
+        val before = repository.snapshot()
+        repository.recoverable("清空大批库存") { it.clearActive(warehouse.id) }
+        val point = repository.recoveryPoints().single()
+        repository.close()
+        SQLiteDatabase.openDatabase(context.getDatabasePath(InventoryRepository.DATABASE_NAME).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery("SELECT length(before_blob) FROM recovery_points WHERE id = ?", arrayOf(point.id)).use { c ->
+                assertTrue(c.moveToFirst()); assertTrue("Exercise a snapshot over 2 MiB", c.getLong(0) > 2 * 1024 * 1024)
+            }
+        }
+        repository = InventoryRepository(context)
+        assertEquals(300, repository.undoRecovery(point.id).processed)
+        assertEquals(before, repository.snapshot())
+        assertTrue(repository.recoveryPoints().single().undone)
+        assertEquals(0, repository.restore(repository.snapshot()))
+    }
+
+    @Test fun conflictingCountryNameDuringUndoKeepsDeviceDatabaseIntact() {
+        val task = repository.snapshot().tasks.single()
+        val country = repository.addCountry("同名国")
+        val warehouse = repository.addWarehouse(country.id, "原仓")
+        repository.save(RecordInput(task.id, warehouse.id, ItemKind.PART, "BOM01", "", 3, "正常", ""))
+        repository.recoverable("删除国家") { it.deleteCountry(country.id) }
+        val point = repository.recoveryPoints().single()
+        repository.addCountry(country.name)
+        val before = repository.snapshot()
+        assertTrue(runCatching { repository.undoRecovery(point.id) }.exceptionOrNull() is IllegalArgumentException)
+        assertEquals(before, repository.snapshot())
+        assertFalse(repository.recoveryPoints().single().undone)
     }
 
     /** Repository requests applicationContext, so preserve this wrapper at that boundary too. */

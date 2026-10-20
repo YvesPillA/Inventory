@@ -20,6 +20,19 @@ data class ImportRow(
 
 /** Standard CSV only. Parsing never evaluates spreadsheet formula text or changes identifier case. */
 object InventoryImport {
+    /** Hash parsed values, so a rename, UTF-8 BOM or line-ending change does not evade the reminder. */
+    fun fingerprint(rows: List<ImportRow>): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        digest.update("fieldstock-csv-v1".toByteArray(Charsets.UTF_8))
+        rows.forEach { row ->
+            listOf(row.kind.name, row.bom, row.sn, row.quantity.toString(), row.condition, row.note).forEach { value ->
+                val bytes = value.toByteArray(Charsets.UTF_8)
+                digest.update(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
+                digest.update(bytes)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
     const val MAX_FILE_BYTES = 8 * 1024 * 1024
     const val MAX_ROWS = 10_000
     private const val MAX_QUANTITY = 1_000_000_000
