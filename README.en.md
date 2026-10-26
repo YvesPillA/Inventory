@@ -1,88 +1,58 @@
-# FieldStock 2.4.1
+# FieldStock
 
 [简体中文](README.md)
 
-An offline inventory counting app for one person using one Android phone. Manage countries and warehouses, count parts by BOM and quantity, record machines by BOM and SN, read printed labels with on-device OCR, export Excel/CSV, and save full backups. Android 8.0 or later is required.
+An offline inventory app for one person using one Android phone. Count parts and machines across countries and warehouses, read printed labels, export reports, and keep full backups. No account or network connection is required.
 
-## Choose a language
+## Download and install
 
-On the first launch of 2.4.1, choose **English** or **简体中文**. Existing installations also get this choice when upgrading; inventory is preserved. Change the language later in **Settings → Language / 语言**. The choice is saved on this phone and does not depend on the device's language.
+Requires **Android 8.0 or later**. Current source: **2.4.1** (version code 7).
 
-Changing language does not translate or change BOMs, SNs, country/warehouse names, notes, raw recognized text, or existing history descriptions. Unsaved inventory form values are preserved when switching language.
+[2.4.1 release APK](artifacts/盘库助手-2.4.1.apk) · [Source archive](artifacts/盘库助手-2.4.1-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
 
-## Count inventory
+This release is for first-time customer installations and uses a new fixed signing key for future updates. It cannot replace earlier Chinese builds signed with the original key. If you already use an earlier build, export a full JSON backup and copy it elsewhere; **do not uninstall before saving your backup**.
 
-1. Create or select a country and warehouse, then tap **Enter warehouse**.
-2. For parts, enter or scan a BOM and enter the quantity being added. For machines, enter or scan a BOM and SN; each machine has a quantity of 1.
-3. Use **More** for condition and notes. Choose **Pending verification** when a label is incomplete. Supply at least one identifier or a note. Pending records are excluded from confirmed totals.
-4. Tap **Save record**. For matching parts in the same warehouse with the same BOM and condition, choose whether to add quantities or create a separate entry.
-5. Use **Records** to edit or void entries. Voided records can be restored. An active machine SN must be unique across all countries and warehouses.
-6. At the end of the day, export the current warehouse and save a full JSON backup. Copy the files to a computer or another location.
+## Features
 
-BOMs contain 1–14 letters or digits. SNs contain two groups of letters or digits separated by a hyphen, with at most 14 letters/digits in total. Leading zeros and case are preserved. Case-only SN differences prompt a review.
+- **Count and manage:** Parts by BOM and quantity; machines by BOM and SN, one record per machine. Edit, void, restore, batch-manage records, and merge warehouses within a country.
+- **Scan offline:** Single or continuous OCR for printed identifiers, with photo zoom and ambiguous-character review. Confirm the value and save it manually. Barcode and QR decoding are outside the feature set.
+- **Chinese and English:** Choose a language on first use and change it in Settings. UI, reports and templates follow the selected language; imports accept either language. Identifiers, names and notes retain their original text.
+- **Export and recover:** Excel/CSV for the current warehouse; full JSON backups for all warehouses. Keep up to seven local backups and up to five recovery points for important operations, subject to capacity.
+- **Check quantities:** Preview import totals and review duplicate-file warnings. Normal and damaged quantities are separate; pending and voided records are excluded from confirmed totals.
 
-## Import Chinese or English CSV
+## Get started
 
-Download the template in **Files → Import → Download import template**. The template uses the selected language and contains only a header:
+1. Choose English or Chinese, then create or select a country and warehouse.
+2. Enter or scan the BOM. Add a quantity for parts, or an SN for each machine. Use **More** for condition and notes.
+3. Save, then review entries in **Records**. At the end of the day, use **Files → Export** to save reports and a full backup, and copy them to another device.
 
-```csv
-Type,BOM,SN,Quantity,Condition,Note
-```
+BOMs contain 1–14 letters or digits. SNs have two nonempty groups joined by `-`, with at most 14 letters/digits in total. Leading zeros and case are preserved. An active machine SN must be unique across all countries and warehouses.
 
-```csv
-类型,BOM,SN,数量,状态,备注
-```
+## Import and export
 
-Standard columns, in this exact order:
+Download the template in **Files → Import**. Imports require **UTF-8 CSV** and accept Chinese, English or mixed headers in this order. English headers and fixed values are case-insensitive.
 
-| English | Chinese | Accepted values |
-| --- | --- | --- |
-| Type | 类型 | `Part` / `Parts` / `配件`; `Machine` / `整机` |
-| BOM | BOM | Letters/digits, preserving leading zeros |
-| SN | SN | Empty for parts; full identifier with a hyphen for machines |
-| Quantity | 数量 | Positive integer; exactly 1 for machines |
-| Condition | 状态 | `Normal` / `正常`; `Damaged` / `损坏`; `Pending verification` / `Pending` / `待核查` |
-| Note | 备注 | Optional free text; required for pending rows if both identifiers are empty |
+| English / Chinese | Values |
+| --- | --- |
+| Type / 类型 | Part / Parts / 配件; Machine / 整机 |
+| BOM | Letters or digits, preserving the original identifier |
+| SN | Empty for parts; full `prefix-suffix` for machines |
+| Quantity / 数量 | Positive integer; exactly 1 for machines |
+| Condition / 状态 | Normal / 正常; Damaged / 损坏; Pending verification / Pending / 待核查 |
+| Note / 备注 | Original free text; pending rows need at least one identifier or a note |
 
-Either language works under either interface language. Chinese/English columns and fixed values may be mixed. English headers and fixed values are case insensitive. Column order and validation remain strict; identifiers and notes are not translated or normalized.
+Format BOM and SN columns as text before entering values in Excel, then save as CSV UTF-8. Limits: 8 MiB and 10,000 rows. Invalid files report a row number and cancel the entire batch. CSV adds inventory; accepting a repeated import adds it again.
 
-Save as **CSV UTF-8**. In Excel, format identifier columns as Text before entering data. Notes containing commas, quotes, or line breaks must use standard CSV quoting. Limits: 8 MiB, 10,000 data rows, 4,000 characters per field. Errors report physical line numbers; a malformed batch is not partially imported.
+Excel reports contain the counting guide, parts detail/summary, machine detail and pending records. CSV ZIP contains three reports and instructions. **Report CSVs, XLSX and ZIP files are not import templates.** Use full JSON backups to migrate all warehouses, voided records and change history. Identical backup records are skipped; conflicting IDs cancel the merge, and newly imported duplicate machine SNs become voided records.
 
-Importing appends inventory. A translated copy with equivalent parsed content has the same import fingerprint, so changing language does not bypass the repeated-import reminder. Changing actual content, row order or identifiers can produce a different fingerprint. History is local to this phone and is not included in JSON backups.
+Local backups and recovery points are deleted on uninstall. Recovery points, CSV import history, preferences and scan photos are not included in portable backups.
 
-XLSX, ZIP and the daily report CSV files are not standard import templates. To restore all app data, use a full JSON backup.
+## Development and documentation
 
-## Export and back up
-
-**Files → Export** exports the current warehouse's historical active records. Names, headers, units, fixed conditions and instructions use the language selected when starting the export, even if the process is recreated while the file picker is open.
-
-- **Excel:** Counting guide, Parts detail, Parts summary, Machine detail, and Pending verification. Identifiers are text cells; quantities are numeric.
-- **CSV ZIP:** Separate parts, machine and pending reports plus instructions, all UTF-8. Text that could be interpreted as a spreadsheet formula receives a leading apostrophe. Prefer XLSX for direct viewing in Excel.
-- **Full JSON backup:** All countries, warehouses, existing inventory including voided/pending records, change history, and legacy compatibility fields. The format and stored values remain compatible with older Chinese releases. JSON backups work in both languages and do not store the selected language.
-
-Restoring merges transactionally. Identical IDs/content are not added twice. A conflicting ID cancels the merge. New machines with duplicate active SNs are kept as voided records.
-
-Daily full backups are enabled by default. The app saves all inventory on first use each local day and keeps up to seven verified backups. Tap **Back up now** to save a later state, then **Save as** or **Share** to copy it elsewhere. Local backups are deleted when the app is uninstalled. Check that shared files have arrived on the receiving device.
-
-Important imports, merges, deletions and batch operations save local recovery points. Up to five are retained, subject to capacity. **Settings → Undo important operation** reverses the relevant changes while preserving unrelated later records; undo stops if affected records have subsequently changed. Recovery points do not replace external backups.
-
-## Printed-label scanning
-
-Single and continuous OCR run on the phone without a login or network connection. Barcode and QR decoding are outside the current feature set.
-
-Continuous scanning shows identifiers line by line. Select a label in the preview or list, review the photo and ambiguous characters, then confirm to fill the form. Scanning does not automatically save inventory. Review leading zeros, letter case, `0/O`, `1/I` and `8/B`. Test real labels for glare, blur, angle and small text before field use.
-
-## Build and upgrade
-
-Version: **2.4.1**, Android version code **7**, database schema **4**. Existing published 0.2.4 APKs in `artifacts/` are the earlier Chinese release; this branch adds the bilingual source. Build a release with the original signing key for an in-place upgrade. A debug APK uses a different key and is intended for testing.
-
-With JDK 17, Android SDK 35 and build tools configured:
+Built with Kotlin, Jetpack Compose, SQLite, CameraX and bundled ML Kit OCR. Requires JDK 17 and Android SDK 35:
 
 ```powershell
-.\gradlew.bat assembleDebug testDebugUnitTest lintDebug assembleDebugAndroidTest
-.\gradlew.bat connectedDebugAndroidTest
+.\gradlew.bat assembleDebug testDebugUnitTest lintDebug
 ```
 
-The connected test task requires an emulator or Android device. The repository also includes `tools/setup-android.ps1` and `tools/build.ps1` for a local toolchain.
-
-Before upgrading, export and copy a full backup elsewhere. Install a release signed with the same key over the existing app. Do not uninstall first: uninstalling deletes the app's local data.
+See the [build and signing guide](docs/构建与发布.md), [operating guide](docs/操作说明.md), [version history](docs/版本记录.md), and [validation records](docs/验收记录.md) (Chinese). Check actual labels, exports and backup recovery on your phone before field use.
