@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.i18n.*
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -29,13 +31,13 @@ object OcrCharacterReview {
     fun options(character: Char): List<Char> = groups.firstOrNull { character in it }?.toList().orEmpty()
     fun positions(value: String): List<Int> = value.indices.filter { options(value[it]).isNotEmpty() }
     fun replace(value: String, index: Int, replacement: Char): String {
-        require(index in value.indices && replacement in options(value[index])) { "请选择当前字符的替换选项" }
+        require(index in value.indices && replacement in options(value[index])) { tr(TextKey.CHOOSE_A_REPLACEMENT_FOR_THIS_CHARACTER) }
         return value.replaceRange(index, index + 1, replacement.toString())
     }
     fun label(character: Char): String = when (character) {
-        in '0'..'9' -> "数字 $character"
-        in 'A'..'Z' -> "大写 $character"
-        else -> "小写 $character"
+        in '0'..'9' -> tr(TextKey.DIGIT, character)
+        in 'A'..'Z' -> tr(TextKey.UPPERCASE, character)
+        else -> tr(TextKey.LOWERCASE, character)
     }
 }
 
@@ -46,20 +48,20 @@ internal fun CharacterReview(value: String, onChange: (String) -> Unit) {
     var chosen by remember(value.length) { mutableIntStateOf(-1) }
     if (positions.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("易混字符逐位核对", style = MaterialTheme.typography.titleSmall)
-        Text("点选位置后按标签替换。标记表示容易混淆，不代表识别有误。", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(tr(TextKey.REVIEW_AMBIGUOUS_CHARACTERS), style = MaterialTheme.typography.titleSmall)
+        Text(tr(TextKey.SELECT_A_POSITION_THEN_TAP_A_REPLACEMENT_A_HIGHLIGHT), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             positions.forEach { index ->
                 FilterChip(
                     selected = chosen == index,
                     onClick = { chosen = index },
                     label = { Text("${index + 1}：${value[index]}", fontFamily = FontFamily.Monospace) },
-                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "核对第 ${index + 1} 位 ${value[index]}" },
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = tr(TextKey.REVIEW_CHARACTER, index + 1, value[index]) },
                 )
             }
         }
         if (chosen in positions) {
-            Text("第 ${chosen + 1} 位：${OcrCharacterReview.label(value[chosen])}", fontSize = 14.sp)
+            Text(tr(TextKey.CHARACTER, chosen + 1, OcrCharacterReview.label(value[chosen])), fontSize = 14.sp)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OcrCharacterReview.options(value[chosen]).forEach { replacement ->
                     OutlinedButton(

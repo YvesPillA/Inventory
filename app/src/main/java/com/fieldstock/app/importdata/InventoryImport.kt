@@ -2,6 +2,7 @@ package com.fieldstock.app.importdata
 
 import com.fieldstock.app.model.IdentifierRules
 import com.fieldstock.app.model.ItemKind
+import com.fieldstock.app.i18n.*
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -38,25 +39,29 @@ object InventoryImport {
     private const val MAX_QUANTITY = 1_000_000_000
     private const val MAX_FIELD_CHARS = 4000
     private val header = listOf("类型", "BOM", "SN", "数量", "状态", "备注")
+    private val englishHeader = listOf("Type", "BOM", "SN", "Quantity", "Condition", "Note")
+    private fun isHeader(fields: List<String>): Boolean = fields.size == header.size &&
+        fields.indices.all { fields[it] == header[it] || fields[it].equals(englishHeader[it], ignoreCase = true) }
     private enum class State { START, UNQUOTED, QUOTED, AFTER_QUOTE }
 
     /** Header only: example inventory must never accidentally become a real imported record. */
-    fun writeTemplate(output: OutputStream) {
-        output.write(("\uFEFF" + header.joinToString(",") + "\r\n").toByteArray(Charsets.UTF_8))
+    fun writeTemplate(output: OutputStream, language: AppLanguage = AppLanguage.current) {
+        val columns = if (language == AppLanguage.ENGLISH) englishHeader else header
+        output.write(("\uFEFF" + columns.joinToString(",") + "\r\n").toByteArray(Charsets.UTF_8))
         output.flush()
     }
 
     fun read(input: InputStream, fileName: String?): List<ImportRow> {
         val bytes = readLimited(input)
         if (bytes.size >= 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()) {
-            invalid(1, "仅支持标准 CSV，不支持 XLSX 或 ZIP；请另存为 CSV UTF-8 后导入。")
+            invalid(1, tr(TextKey.ONLY_STANDARD_CSV_IS_SUPPORTED_XLSX_AND_ZIP_CANNOT))
         }
         val text = try {
             Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix("\uFEFF")
         } catch (failure: CharacterCodingException) {
             val hint = fileName?.take(80)?.filterNot(Char::isISOControl)?.let { "（$it）" }.orEmpty()
-            throw IllegalArgumentException("第 1 行：文件${hint}不是有效 UTF-8 CSV，请另存为 CSV UTF-8。", failure)
+            throw IllegalArgumentException(tr(TextKey.LINE_1_FILE_IS_NOT_VALID_UTF_8_CSV, hint), failure)
         }
         val rows = mutableListOf<ImportRow>()
         val fields = mutableListOf<String>()
@@ -68,7 +73,7 @@ object InventoryImport {
         var index = 0
 
         fun finishField() {
-            if (fields.size >= header.size) invalid(rowStartLine, "需要 6 列，列数过多；备注中的逗号或换行必须使用双引号包围。")
+            if (fields.size >= header.size) invalid(rowStartLine, tr(TextKey.EXPECTED_6_COLUMNS_FOUND_TOO_MANY_NOTES_CONTAINING_COMMAS))
             fields.add(field.toString())
             field.setLength(0)
             state = State.START
@@ -77,25 +82,25 @@ object InventoryImport {
             finishField()
             if (fields.any { it.isNotBlank() }) {
                 if (!foundHeader) {
-                    if (fields != header) invalid(rowStartLine, "表头必须按顺序为：${header.joinToString(",")}。")
+                    if (!isHeader(fields)) invalid(rowStartLine, tr(TextKey.HEADERS_MUST_BE_IN_THIS_ORDER_TYPE_BOM_SN))
                     foundHeader = true
                 } else {
-                    if (fields == header) invalid(rowStartLine, "重复表头，请只保留第一行表头。")
-                    if (fields.size != header.size) invalid(rowStartLine, "需要 6 列，实际为 ${fields.size} 列；备注中的逗号或换行必须使用双引号包围。")
-                    if (rows.size >= MAX_ROWS) invalid(rowStartLine, "数据不能超过 10000 行，请分批导入。")
+                    if (isHeader(fields)) invalid(rowStartLine, tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW))
+                    if (fields.size != header.size) invalid(rowStartLine, tr(TextKey.EXPECTED_6_COLUMNS_FOUND_NOTES_CONTAINING_COMMAS_OR_LINE, fields.size))
+                    if (rows.size >= MAX_ROWS) invalid(rowStartLine, tr(TextKey.DATA_MUST_NOT_EXCEED_10000_ROWS_IMPORT_IN_SMALLER))
                     rows.add(validate(fields, rowStartLine))
                 }
             }
             fields.clear()
         }
         fun append(character: Char) {
-            if (field.length >= MAX_FIELD_CHARS) invalid(rowStartLine, "单个字段不能超过 4000 字。")
+            if (field.length >= MAX_FIELD_CHARS) invalid(rowStartLine, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
             field.append(character)
         }
 
         while (index < text.length) {
             val character = text[index]
-            if (character.isISOControl() && character !in listOf('\t', '\r', '\n')) invalid(line, "文件含无效控制字符。")
+            if (character.isISOControl() && character !in listOf('\t', '\r', '\n')) invalid(line, tr(TextKey.THE_FILE_CONTAINS_AN_INVALID_CONTROL_CHARACTER))
             when {
                 character == '\r' || character == '\n' -> {
                     val crlf = character == '\r' && index + 1 < text.length && text[index + 1] == '\n'
@@ -110,44 +115,43 @@ object InventoryImport {
                 character == ',' && state != State.QUOTED -> finishField()
                 character == '"' -> when (state) {
                     State.START -> state = State.QUOTED
-                    State.UNQUOTED -> invalid(line, "未加引号的字段中出现双引号。")
-                    State.AFTER_QUOTE -> invalid(line, "结束引号后只能出现逗号、换行或文件结束。")
+                    State.UNQUOTED -> invalid(line, tr(TextKey.A_DOUBLE_QUOTE_APPEARS_INSIDE_AN_UNQUOTED_FIELD))
+                    State.AFTER_QUOTE -> invalid(line, tr(TextKey.ONLY_A_COMMA_LINE_BREAK_OR_END_OF_FILE))
                     State.QUOTED -> {
                         if (index + 1 < text.length && text[index + 1] == '"') { append('"'); index++ }
                         else state = State.AFTER_QUOTE
                     }
                 }
-                state == State.AFTER_QUOTE -> invalid(line, "结束引号后只能出现逗号、换行或文件结束。")
+                state == State.AFTER_QUOTE -> invalid(line, tr(TextKey.ONLY_A_COMMA_LINE_BREAK_OR_END_OF_FILE))
                 else -> { append(character); if (state == State.START) state = State.UNQUOTED }
             }
             index++
         }
-        if (state == State.QUOTED) invalid(rowStartLine, "双引号未闭合。")
+        if (state == State.QUOTED) invalid(rowStartLine, tr(TextKey.UNCLOSED_DOUBLE_QUOTE))
         if (state != State.START || field.isNotEmpty() || fields.isNotEmpty()) finishRow()
-        if (!foundHeader) invalid(1, "缺少表头，请使用下载的标准 CSV 模板。")
+        if (!foundHeader) invalid(1, tr(TextKey.MISSING_HEADER_USE_THE_STANDARD_CSV_TEMPLATE))
         return rows
     }
 
     private fun validate(fields: List<String>, line: Int): ImportRow {
-        val kind = when (fields[0]) {
-            "配件" -> ItemKind.PART
-            "整机" -> ItemKind.MACHINE
-            else -> invalid(line, "类型只能填写“配件”或“整机”。")
+        val kind = when (fields[0].lowercase(java.util.Locale.ROOT)) {
+            "配件", "part", "parts" -> ItemKind.PART
+            "整机", "machine", "machines" -> ItemKind.MACHINE
+            else -> invalid(line, tr(TextKey.TYPE_MUST_BE_PART_OR_MACHINE_CHINESE_VALUES_ARE))
         }
         val bom = fields[1]
         val sn = fields[2]
-        val condition = fields[4]
+        val condition = StockCondition.parse(fields[4]) ?: invalid(line, tr(TextKey.CONDITION_MUST_BE_NORMAL_DAMAGED_OR_PENDING_VERIFICATION_CHINESE))
         val note = fields[5]
-        if (condition !in setOf("正常", "损坏", "待核查")) invalid(line, "状态只能填写“正常”“损坏”或“待核查”。")
-        val pending = condition == "待核查"
+        val pending = condition == StockCondition.PENDING
         if (!pending || bom.isNotEmpty()) IdentifierRules.validateBom(bom)?.let { invalid(line, it) }
-        if (kind == ItemKind.PART && sn.isNotEmpty()) invalid(line, "配件的 SN 必须留空。")
+        if (kind == ItemKind.PART && sn.isNotEmpty()) invalid(line, tr(TextKey.SN_MUST_BE_EMPTY_FOR_PARTS))
         if (kind == ItemKind.MACHINE && (!pending || sn.isNotEmpty())) IdentifierRules.validateSn(sn)?.let { invalid(line, it) }
-        if (pending && bom.isEmpty() && sn.isEmpty() && note.isBlank()) invalid(line, "待核查记录至少填写一个编号或备注。")
+        if (pending && bom.isEmpty() && sn.isEmpty() && note.isBlank()) invalid(line, tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A_2))
         val quantityText = fields[3]
         val quantity = if (quantityText.isNotEmpty() && quantityText.all { it in '0'..'9' }) quantityText.toIntOrNull() else null
-        if (quantity == null || quantity !in 1..MAX_QUANTITY) invalid(line, "数量须为 1 到 1000000000 的整数。")
-        if (kind == ItemKind.MACHINE && quantity != 1) invalid(line, "整机数量必须为 1。")
+        if (quantity == null || quantity !in 1..MAX_QUANTITY) invalid(line, tr(TextKey.QUANTITY_MUST_BE_AN_INTEGER_BETWEEN_1_AND_1000000000))
+        if (kind == ItemKind.MACHINE && quantity != 1) invalid(line, tr(TextKey.MACHINE_QUANTITY_MUST_BE_1_2))
         return ImportRow(kind, bom, sn, quantity, condition, note)
     }
 
@@ -157,10 +161,10 @@ object InventoryImport {
         while (true) {
             val count = input.read(buffer)
             if (count < 0) break
-            if (output.size().toLong() + count > MAX_FILE_BYTES) invalid(1, "文件不能超过 8 MiB，请分批导入。")
+            if (output.size().toLong() + count > MAX_FILE_BYTES) invalid(1, tr(TextKey.FILE_MUST_NOT_EXCEED_8_MIB_IMPORT_IN_SMALLER))
             output.write(buffer, 0, count)
         }
         return output.toByteArray()
     }
-    private fun invalid(line: Int, message: String): Nothing = throw IllegalArgumentException("第 $line 行：$message")
+    private fun invalid(line: Int, message: String): Nothing = throw IllegalArgumentException(tr(TextKey.LINE, line, message))
 }

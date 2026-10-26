@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.i18n.*
+
 /** The field requested by the inventory form. OCR never fills both fields implicitly. */
 enum class IdentifierField { BOM, SN }
 
@@ -57,8 +59,8 @@ object OcrCandidates {
         val hasSpaces = hyphensNormalized.any(Char::isWhitespace)
         if (isValid(compact, field) && (!hasSpaces || mayJoinSpaces(hyphensNormalized, field))) {
             val corrections = buildList {
-                if (source != hyphensNormalized) add("横线已统一为 -")
-                if (hasSpaces) add("已移除同一行内的空格，请核对")
+                if (source != hyphensNormalized) add(tr(TextKey.HYPHEN_NORMALIZED_TO))
+                if (hasSpaces) add(tr(TextKey.SPACES_WITHIN_THE_SAME_LINE_WERE_REMOVED_PLEASE_CHECK))
             }
             result += OcrCandidate(source, compact, corrections)
             return
@@ -70,8 +72,8 @@ object OcrCandidates {
             // Unlabelled prose must not generate one suggestion for every ordinary word.
             if (isValid(value, field) && (explicitlyLabelled || value.any(Char::isDigit))) {
                 val corrections = buildList {
-                    if (raw != normalizedHyphens) add("横线已统一为 -")
-                    if (normalizedHyphens.any(Char::isWhitespace)) add("已移除横线附近空格，请核对")
+                    if (raw != normalizedHyphens) add(tr(TextKey.HYPHEN_NORMALIZED_TO))
+                    if (normalizedHyphens.any(Char::isWhitespace)) add(tr(TextKey.SPACES_AROUND_THE_HYPHEN_WERE_REMOVED_PLEASE_CHECK))
                 }
                 result += OcrCandidate(raw, value, corrections)
             }
