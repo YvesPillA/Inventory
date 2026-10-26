@@ -22,12 +22,16 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isIncludeAndroidResources = true }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-    val signingFile = rootProject.file(".signing/signing.properties")
+    packaging {
+        // Compress bundled native libraries to keep downloadable APKs small.
+        jniLibs.useLegacyPackaging = true
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+    val signingFile = rootProject.file(".signing/customer-signing.properties")
     if (signingFile.exists()) {
         val signingProperties = Properties().apply { signingFile.inputStream().use { load(it) } }
         signingConfigs.create("localRelease") {
-            storeFile = rootProject.file(".signing/fieldstock-release.jks")
+            storeFile = rootProject.file(".signing/fieldstock-customer-release.jks")
             storePassword = signingProperties.getProperty("storePassword")
             keyAlias = "fieldstock"
             keyPassword = signingProperties.getProperty("keyPassword")
