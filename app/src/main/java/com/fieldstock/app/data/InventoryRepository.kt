@@ -1,5 +1,7 @@
 package com.fieldstock.app.data
 
+import com.fieldstock.app.i18n.*
+
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
@@ -47,7 +49,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     /** Snapshot, stock changes, import receipt and recovery point commit together or not at all. */
     @Synchronized
     fun <T> recoverable(label: String, work: (InventoryRepository) -> T): T = transaction { db ->
-        require(label.isNotBlank() && label.length <= 512) { "恢复点名称无效" }
+        require(label.isNotBlank() && label.length <= 512) { tr(TextKey.INVALID_RECOVERY_POINT_NAME) }
         val before = readSnapshot(db)
         val receiptsBefore = readReceipts(db)
         val beforeBytes = encodeSnapshot(before)
@@ -59,7 +61,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             val oldReceipts = receiptsJson(receiptsBefore)
             val newReceipts = receiptsJson(receiptsAfter)
             val size = beforeBytes.size.toLong() + afterBytes.size + oldReceipts.toByteArray(Charsets.UTF_8).size + newReceipts.toByteArray(Charsets.UTF_8).size
-            require(size <= MAX_RECOVERY_BYTES) { "恢复点超过容量上限，操作未执行，请先导出并整理历史数据" }
+            require(size <= MAX_RECOVERY_BYTES) { tr(TextKey.RECOVERY_POINT_EXCEEDS_THE_SIZE_LIMIT_NO_CHANGES_WERE) }
             val a = before.records.associateBy { it.id }; val b = after.records.associateBy { it.id }
             db.insertOrThrow("recovery_points", null, ContentValues().apply {
                 put("id", newId()); put("label", label); put("at", System.currentTimeMillis()); put("undone", 0)
@@ -83,8 +85,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
     fun undoRecovery(id: String): MutationResult = transaction { db ->
         data class Stored(val before: InventorySnapshot, val after: InventorySnapshot, val beforeReceipts: List<ImportReceipt>, val afterReceipts: List<ImportReceipt>)
         val stored = db.query("recovery_points", arrayOf("undone"), "id = ?", arrayOf(id), null, null, null).use { c ->
-            require(c.moveToFirst()) { "恢复点已清理或不存在" }
-            require(c.int("undone") == 0) { "这次操作已经撤销，不能再次撤销" }
+            require(c.moveToFirst()) { tr(TextKey.RECOVERY_POINT_WAS_REMOVED_OR_DOES_NOT_EXIST) }
+            require(c.int("undone") == 0) { tr(TextKey.THIS_OPERATION_HAS_ALREADY_BEEN_UNDONE) }
             Stored(InventoryFiles.readBackup(readRecoveryBytes(db, id, "before_blob").inputStream()),
                 InventoryFiles.readBackup(readRecoveryBytes(db, id, "after_blob").inputStream()),
                 parseReceipts(readRecoveryBytes(db, id, "before_receipts").toString(Charsets.UTF_8)),
@@ -92,7 +94,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         }
         val current = readSnapshot(db)
         var target = SnapshotUndo.prepare(stored.before, stored.after, current)
-        val receipts = SnapshotUndo.revertRows("导入记录", stored.beforeReceipts, stored.afterReceipts, readReceipts(db), ImportReceipt::id)
+        val receipts = SnapshotUndo.revertRows(tr(TextKey.IMPORT_HISTORY), stored.beforeReceipts, stored.afterReceipts, readReceipts(db), ImportReceipt::id)
         val old = stored.before.records.associateBy { it.id }; val after = stored.after.records.associateBy { it.id }
         val restoring = old.keys.filterTo(mutableSetOf()) { old[it] != after[it] }
         val serials = target.records.filter { it.id !in restoring && !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
@@ -157,9 +159,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun addTask(name: String): InventoryTask {
-        val task = InventoryTask(newId(), checkedName(name, "盘点任务"), System.currentTimeMillis())
+        val task = InventoryTask(newId(), checkedName(name, tr(TextKey.INVENTORY_TASK)), System.currentTimeMillis())
         transaction { db ->
-            require(!taskNameExists(db, task.name)) { "已存在同名盘点任务" }
+            require(!taskNameExists(db, task.name)) { tr(TextKey.AN_INVENTORY_TASK_WITH_THIS_NAME_ALREADY_EXISTS) }
             insertTask(db, task)
         }
         return task
@@ -167,22 +169,22 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun renameTask(id: String, name: String): InventoryTask = transaction { db ->
-        val checked = checkedName(name, "盘点任务")
+        val checked = checkedName(name, tr(TextKey.INVENTORY_TASK))
         val previous = db.query("tasks", null, "id = ?", arrayOf(id), null, null, null).use { cursor ->
-            require(cursor.moveToFirst()) { "盘点任务不存在" }
+            require(cursor.moveToFirst()) { tr(TextKey.INVENTORY_TASK_DOES_NOT_EXIST) }
             InventoryTask(cursor.string("id"), cursor.string("name"), cursor.long("created_at"))
         }
-        require(!taskNameExists(db, checked, id)) { "已存在同名盘点任务" }
+        require(!taskNameExists(db, checked, id)) { tr(TextKey.AN_INVENTORY_TASK_WITH_THIS_NAME_ALREADY_EXISTS) }
         db.update("tasks", ContentValues().apply { put("name", checked) }, "id = ?", arrayOf(id))
         previous.copy(name = checked)
     }
 
     @Synchronized
     fun addCountry(name: String): Country {
-        val country = Country(newId(), checkedName(name, "国家"))
+        val country = Country(newId(), checkedName(name, tr(TextKey.COUNTRY)))
         transaction { db ->
             require(!exists(db, "countries", "name_key = ?", arrayOf(nameKey(country.name)))) {
-                "这个国家已存在"
+                tr(TextKey.THIS_COUNTRY_ALREADY_EXISTS)
             }
             insertCountry(db, country)
         }
@@ -191,10 +193,10 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun renameCountry(id: String, name: String): Country = transaction { db ->
-        val checked = checkedName(name, "国家")
-        require(exists(db, "countries", "id = ?", arrayOf(id))) { "国家不存在" }
+        val checked = checkedName(name, tr(TextKey.COUNTRY))
+        require(exists(db, "countries", "id = ?", arrayOf(id))) { tr(TextKey.COUNTRY_DOES_NOT_EXIST) }
         require(!exists(db, "countries", "name_key = ? AND id != ?", arrayOf(nameKey(checked), id))) {
-            "这个国家已存在"
+            tr(TextKey.THIS_COUNTRY_ALREADY_EXISTS)
         }
         db.update("countries", ContentValues().apply {
             put("name", checked); put("name_key", nameKey(checked))
@@ -204,11 +206,11 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun addWarehouse(countryId: String, name: String): Warehouse {
-        val warehouse = Warehouse(newId(), countryId, checkedName(name, "仓库"))
+        val warehouse = Warehouse(newId(), countryId, checkedName(name, tr(TextKey.WAREHOUSE)))
         transaction { db ->
-            require(exists(db, "countries", "id = ?", arrayOf(countryId))) { "国家不存在" }
+            require(exists(db, "countries", "id = ?", arrayOf(countryId))) { tr(TextKey.COUNTRY_DOES_NOT_EXIST) }
             require(!exists(db, "warehouses", "country_id = ? AND name_key = ?",
-                arrayOf(countryId, nameKey(warehouse.name)))) { "该国家已存在同名仓库" }
+                arrayOf(countryId, nameKey(warehouse.name)))) { tr(TextKey.A_WAREHOUSE_WITH_THIS_NAME_ALREADY_EXISTS_IN_THIS) }
             insertWarehouse(db, warehouse)
         }
         return warehouse
@@ -216,13 +218,13 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun renameWarehouse(id: String, name: String): Warehouse = transaction { db ->
-        val checked = checkedName(name, "仓库")
+        val checked = checkedName(name, tr(TextKey.WAREHOUSE))
         val previous = db.query("warehouses", null, "id = ?", arrayOf(id), null, null, null).use { cursor ->
-            require(cursor.moveToFirst()) { "仓库不存在" }
+            require(cursor.moveToFirst()) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
             Warehouse(cursor.string("id"), cursor.string("country_id"), cursor.string("name"))
         }
         require(!exists(db, "warehouses", "country_id = ? AND name_key = ? AND id != ?",
-            arrayOf(previous.countryId, nameKey(checked), id))) { "该国家已存在同名仓库" }
+            arrayOf(previous.countryId, nameKey(checked), id))) { tr(TextKey.A_WAREHOUSE_WITH_THIS_NAME_ALREADY_EXISTS_IN_THIS) }
         db.update("warehouses", ContentValues().apply {
             put("name", checked); put("name_key", nameKey(checked))
         }, "id = ?", arrayOf(id))
@@ -231,8 +233,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun save(input: RecordInput, recordId: String? = null): StockRecord = transaction { db ->
-        val previous = recordId?.let { findRecord(db, it) ?: error("记录不存在") }
-        require(previous?.voided != true) { "已作废的记录不能修改，请重新录入" }
+        val previous = recordId?.let { findRecord(db, it) ?: error(tr(TextKey.RECORD_DOES_NOT_EXIST)) }
+        require(previous?.voided != true) { tr(TextKey.VOIDED_RECORDS_CANNOT_BE_EDITED_CREATE_A_NEW_RECORD) }
         val now = maxOf(System.currentTimeMillis(), previous?.updatedAt ?: 0L)
         val record = StockRecord(
             id = previous?.id ?: newId(),
@@ -254,11 +256,11 @@ class InventoryRepository(context: Context) : AutoCloseable {
             voided = false,
         )
         validateRecord(record)
-        require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { "盘点任务不存在" }
-        require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { "仓库不存在" }
+        require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { tr(TextKey.INVENTORY_TASK_DOES_NOT_EXIST) }
+        require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
         if (record.kind == ItemKind.MACHINE && record.sn.isNotEmpty()) {
             activeDuplicate(db, record.sn, record.id)?.let {
-                throw DuplicateSnException(it, "SN 已存在于未作废整机记录：${record.sn}")
+                throw DuplicateSnException(it, tr(TextKey.AN_ACTIVE_MACHINE_ALREADY_USES_SN, record.sn))
             }
         }
         if (previous == null) insertRecord(db, record)
@@ -273,7 +275,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     @Synchronized
     fun voidRecord(id: String) {
         transaction { db ->
-            val previous = findRecord(db, id) ?: error("记录不存在")
+            val previous = findRecord(db, id) ?: error(tr(TextKey.RECORD_DOES_NOT_EXIST))
             if (!previous.voided) {
                 val now = maxOf(System.currentTimeMillis(), previous.updatedAt)
                 val record = previous.copy(voided = true, updatedAt = now)
@@ -286,8 +288,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
     /** Restore the original state and quantity; an occupied serial leaves this record voided. */
     @Synchronized
     fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY): MutationResult = transaction { db ->
-        val previous = findRecord(db, id) ?: throw IllegalArgumentException("记录不存在")
-        require(previous.voided) { "只能还原已作废的记录" }
+        val previous = findRecord(db, id) ?: throw IllegalArgumentException(tr(TextKey.RECORD_DOES_NOT_EXIST))
+        require(previous.voided) { tr(TextKey.ONLY_VOIDED_RECORDS_CAN_BE_RESTORED) }
         if (previous.kind == ItemKind.MACHINE && previous.sn.isNotEmpty()) {
             if (activeDuplicate(db, previous.sn, id) != null) {
                 return@transaction MutationResult(0, listOf(previous))
@@ -316,8 +318,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
         val duplicates = mutableListOf<StockRecord>()
         inputs.forEach { duplicates += incoming(db, it, mode).duplicateMachines }
         if (metadata != null) {
-            require(inputs.isNotEmpty() && inputs.map { it.warehouseId }.distinct().size == 1) { "文件导入必须选择一个仓库" }
-            require(metadata.fingerprint.matches(Regex("[a-f0-9]{64}")) && metadata.fileName.length <= 200) { "导入文件信息无效" }
+            require(inputs.isNotEmpty() && inputs.map { it.warehouseId }.distinct().size == 1) { tr(TextKey.CHOOSE_A_WAREHOUSE_BEFORE_IMPORTING_A_FILE) }
+            require(metadata.fingerprint.matches(Regex("[a-f0-9]{64}")) && metadata.fileName.length <= 200) { tr(TextKey.INVALID_IMPORT_FILE_INFORMATION) }
             val warehouse = inputs.first().warehouseId
             val label = db.rawQuery("SELECT c.name, w.name FROM warehouses w JOIN countries c ON c.id = w.country_id WHERE w.id = ?", arrayOf(warehouse)).use { c ->
                 check(c.moveToFirst()); "${c.getString(0)} / ${c.getString(1)}"
@@ -329,7 +331,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun voidRecords(ids: Set<String>): Int = transaction { db ->
-        val records = ids.map { findRecord(db, it) ?: throw IllegalArgumentException("记录不存在") }
+        val records = ids.map { findRecord(db, it) ?: throw IllegalArgumentException(tr(TextKey.RECORD_DOES_NOT_EXIST)) }
         val active = records.filter { !it.voided }
         active.forEach { before ->
             val now = maxOf(System.currentTimeMillis(), before.updatedAt)
@@ -342,20 +344,20 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun mergeParts(ids: Set<String>): MutationResult = transaction { db ->
-        require(ids.size >= 2) { "至少选择两条配件记录" }
-        val selected = ids.map { findRecord(db, it) ?: throw IllegalArgumentException("记录不存在") }
+        require(ids.size >= 2) { tr(TextKey.SELECT_AT_LEAST_TWO_PARTS_RECORDS) }
+        val selected = ids.map { findRecord(db, it) ?: throw IllegalArgumentException(tr(TextKey.RECORD_DOES_NOT_EXIST)) }
             .sortedWith(compareBy<StockRecord> { it.createdAt }.thenBy { it.id })
         val target = selected.first()
-        require(target.bom.isNotEmpty()) { "缺少 BOM 的待核查配件不能合并" }
+        require(target.bom.isNotEmpty()) { tr(TextKey.PENDING_PARTS_WITHOUT_A_BOM_CANNOT_BE_MERGED) }
         require(selected.all { it.kind == ItemKind.PART && !it.voided && it.warehouseId == target.warehouseId &&
-            it.bom == target.bom && it.condition == target.condition }) { "只能合并同仓库、同 BOM、同状态的未作废配件" }
+            it.bom == target.bom && it.condition == target.condition }) { tr(TextKey.ONLY_ACTIVE_PARTS_IN_THE_SAME_WAREHOUSE_WITH_THE) }
         combineParts(db, target, selected.drop(1), consumeSources = true)
         MutationResult(selected.size)
     }
 
     @Synchronized
     fun deleteWarehouse(id: String): Int = transaction { db ->
-        require(exists(db, "warehouses", "id = ?", arrayOf(id))) { "仓库不存在" }
+        require(exists(db, "warehouses", "id = ?", arrayOf(id))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
         db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id = ?)", arrayOf(id))
         val count = db.delete("records", "warehouse_id = ?", arrayOf(id))
         rewriteAuditWarehouses(db, setOf(id))
@@ -366,7 +368,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun deleteCountry(id: String): Int = transaction { db ->
-        require(exists(db, "countries", "id = ?", arrayOf(id))) { "国家不存在" }
+        require(exists(db, "countries", "id = ?", arrayOf(id))) { tr(TextKey.COUNTRY_DOES_NOT_EXIST) }
         val warehouses = db.query("warehouses", arrayOf("id"), "country_id = ?", arrayOf(id), null, null, null).use { cursor ->
             buildSet { while (cursor.moveToNext()) add(cursor.string("id")) }
         }
@@ -381,11 +383,11 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun mergeWarehouses(sourceId: String, targetId: String, mode: DuplicateMode): MutationResult = transaction { db ->
-        require(sourceId != targetId) { "来源与目标仓库不能相同" }
+        require(sourceId != targetId) { tr(TextKey.SOURCE_AND_TARGET_WAREHOUSES_MUST_BE_DIFFERENT) }
         fun countryOf(id: String): String = db.query("warehouses", arrayOf("country_id"), "id = ?", arrayOf(id), null, null, null).use {
-            require(it.moveToFirst()) { "仓库不存在" }; it.string("country_id")
+            require(it.moveToFirst()) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }; it.string("country_id")
         }
-        require(countryOf(sourceId) == countryOf(targetId)) { "只能合并同一国家的仓库" }
+        require(countryOf(sourceId) == countryOf(targetId)) { tr(TextKey.ONLY_WAREHOUSES_IN_THE_SAME_COUNTRY_CAN_BE_MERGED) }
         val sources = db.query("records", null, "warehouse_id = ?", arrayOf(sourceId), null, null, "created_at ASC, id ASC").use { cursor ->
             buildList { while (cursor.moveToNext()) add(readRecord(cursor)) }
         }
@@ -420,8 +422,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
     @Synchronized
     fun deleteVoided(id: String) {
         transaction { db ->
-            val record = findRecord(db, id) ?: throw IllegalArgumentException("记录不存在")
-            require(record.voided) { "只能彻底删除已作废的记录" }
+            val record = findRecord(db, id) ?: throw IllegalArgumentException(tr(TextKey.RECORD_DOES_NOT_EXIST))
+            require(record.voided) { tr(TextKey.ONLY_VOIDED_RECORDS_CAN_BE_PERMANENTLY_DELETED) }
             db.delete("changes", "record_id = ?", arrayOf(id))
             db.delete("records", "id = ?", arrayOf(id))
         }
@@ -430,7 +432,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     /** Permanently clear voided records in this warehouse only; active records are untouched. */
     @Synchronized
     fun clearVoided(warehouseId: String): Int = transaction { db ->
-        require(exists(db, "warehouses", "id = ?", arrayOf(warehouseId))) { "仓库不存在" }
+        require(exists(db, "warehouses", "id = ?", arrayOf(warehouseId))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
         db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id = ? AND voided = 1)",
             arrayOf(warehouseId))
         db.delete("records", "warehouse_id = ? AND voided = 1", arrayOf(warehouseId))
@@ -439,7 +441,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     /** Caller supplies the two user confirmations; this removes active records in one warehouse. */
     @Synchronized
     fun clearActive(warehouseId: String): Int = transaction { db ->
-        require(exists(db, "warehouses", "id = ?", arrayOf(warehouseId))) { "仓库不存在" }
+        require(exists(db, "warehouses", "id = ?", arrayOf(warehouseId))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
         db.delete("changes", "record_id IN (SELECT id FROM records WHERE warehouse_id = ? AND voided = 0)",
             arrayOf(warehouseId))
         db.delete("records", "warehouse_id = ? AND voided = 0", arrayOf(warehouseId))
@@ -465,9 +467,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
     @Synchronized
     fun restore(snapshot: InventorySnapshot): Int = transaction { db ->
         val current = readSnapshot(db)
-        val tasks = mergeById("盘点任务", current.tasks, snapshot.tasks, InventoryTask::id)
-        val countries = mergeById("国家", current.countries, snapshot.countries, Country::id)
-        val warehouses = mergeById("仓库", current.warehouses, snapshot.warehouses, Warehouse::id)
+        val tasks = mergeById(tr(TextKey.INVENTORY_TASK), current.tasks, snapshot.tasks, InventoryTask::id)
+        val countries = mergeById(tr(TextKey.COUNTRY), current.countries, snapshot.countries, Country::id)
+        val warehouses = mergeById(tr(TextKey.WAREHOUSE), current.warehouses, snapshot.warehouses, Warehouse::id)
         val currentIds = current.records.mapTo(mutableSetOf()) { it.id }
         val occupied = current.records.filter { it.kind == ItemKind.MACHINE && !it.voided && it.sn.isNotEmpty() }
             .associateByTo(mutableMapOf()) { it.sn }
@@ -483,7 +485,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
                 } else { occupied[record.sn] = record; record }
             } else record
         }
-        val records = mergeById("库存记录", current.records, incomingRecords, StockRecord::id) { existing, incoming ->
+        val records = mergeById(tr(TextKey.INVENTORY_RECORDS), current.records, incomingRecords, StockRecord::id) { existing, incoming ->
             existing == incoming || current.changes.any { log ->
                 log.recordId == incoming.id && log.action == "VOID" && runCatching {
                     val after = JSONObject(log.after)
@@ -492,42 +494,42 @@ class InventoryRepository(context: Context) : AutoCloseable {
                 }.getOrDefault(false)
             }
         }
-        val changes = mergeById("修改历史", current.changes, snapshot.changes + duplicateAudits, ChangeLog::id)
+        val changes = mergeById(tr(TextKey.CHANGE_HISTORY), current.changes, snapshot.changes + duplicateAudits, ChangeLog::id)
 
         tasks.values.forEach {
             validateId(it.id)
-            require(it.name == checkedName(it.name, "盘点任务")) { "盘点任务名称包含首尾空格" }
-            require(it.createdAt >= 0) { "盘点任务时间无效" }
+            require(it.name == checkedName(it.name, tr(TextKey.INVENTORY_TASK))) { tr(TextKey.INVENTORY_TASK_NAME_HAS_LEADING_OR_TRAILING_SPACES) }
+            require(it.createdAt >= 0) { tr(TextKey.INVALID_INVENTORY_TASK_TIMESTAMP) }
         }
         val countryNames = mutableSetOf<String>()
         countries.values.forEach {
             validateId(it.id)
-            require(it.name == checkedName(it.name, "国家")) { "国家名称包含首尾空格" }
-            require(countryNames.add(nameKey(it.name))) { "备份中存在重名国家：${it.name}" }
+            require(it.name == checkedName(it.name, tr(TextKey.COUNTRY))) { tr(TextKey.COUNTRY_NAME_HAS_LEADING_OR_TRAILING_SPACES) }
+            require(countryNames.add(nameKey(it.name))) { tr(TextKey.BACKUP_CONTAINS_DUPLICATE_COUNTRY_NAMES, it.name) }
         }
         val warehouseNames = mutableSetOf<Pair<String, String>>()
         warehouses.values.forEach {
             validateId(it.id)
             validateId(it.countryId)
-            require(it.countryId in countries) { "仓库对应的国家不存在" }
-            require(it.name == checkedName(it.name, "仓库")) { "仓库名称包含首尾空格" }
-            require(warehouseNames.add(it.countryId to nameKey(it.name))) { "同一国家存在重名仓库：${it.name}" }
+            require(it.countryId in countries) { tr(TextKey.THE_WAREHOUSE_S_COUNTRY_DOES_NOT_EXIST) }
+            require(it.name == checkedName(it.name, tr(TextKey.WAREHOUSE))) { tr(TextKey.WAREHOUSE_NAME_HAS_LEADING_OR_TRAILING_SPACES) }
+            require(warehouseNames.add(it.countryId to nameKey(it.name))) { tr(TextKey.DUPLICATE_WAREHOUSE_NAMES_IN_ONE_COUNTRY, it.name) }
         }
         val serials = mutableMapOf<String, StockRecord>()
         records.values.forEach {
             validateRecord(it)
-            require(it.taskId in tasks) { "库存记录对应的盘点任务不存在" }
-            require(it.warehouseId in warehouses) { "库存记录对应的仓库不存在" }
+            require(it.taskId in tasks) { tr(TextKey.THE_RECORD_S_INVENTORY_TASK_DOES_NOT_EXIST) }
+            require(it.warehouseId in warehouses) { tr(TextKey.THE_RECORD_S_WAREHOUSE_DOES_NOT_EXIST) }
             if (it.kind == ItemKind.MACHINE && !it.voided && it.sn.isNotEmpty()) {
                 val other = serials.put(it.sn, it)
                 if (other != null) throw DuplicateSnException(other,
-                    "备份含重复的未作废 SN：${it.sn}，整个备份未导入；请先在原设备核对并作废重复记录")
+                    tr(TextKey.BACKUP_CONTAINS_DUPLICATE_ACTIVE_SN_NOTHING_WAS_IMPORTED_CHECK, it.sn))
             }
         }
         changes.values.forEach {
             validateId(it.id)
             validateId(it.recordId)
-            require(it.recordId in records) { "修改历史对应的库存记录不存在" }
+            require(it.recordId in records) { tr(TextKey.THE_RECORD_LINKED_TO_CHANGE_HISTORY_DOES_NOT_EXIST) }
             validateChange(it, tasks.keys, warehouses.keys)
         }
 
@@ -555,8 +557,8 @@ class InventoryRepository(context: Context) : AutoCloseable {
             if (input.kind == ItemKind.MACHINE) 1 else input.quantity, input.condition.trim(), input.note.trim(), input.location.trim(),
             input.sourceBom, input.sourceSn, input.rawBom, input.rawSn, now, now, false)
         validateRecord(record)
-        require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { "兼容记录分组不存在" }
-        require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { "仓库不存在" }
+        require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { tr(TextKey.LEGACY_RECORD_GROUP_DOES_NOT_EXIST) }
+        require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
         if (record.kind == ItemKind.PART && mode == DuplicateMode.ADD_QUANTITY) {
             earliestPart(db, record)?.let { target ->
                 combineParts(db, target, listOf(record), consumeSources = false)
@@ -579,9 +581,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     private fun combineParts(db: SQLiteDatabase, target: StockRecord, sources: List<StockRecord>, consumeSources: Boolean) {
         val quantity = target.quantity.toLong() + sources.sumOf { it.quantity.toLong() }
-        require(quantity in 1..MAX_QUANTITY.toLong()) { "合并数量超过 $MAX_QUANTITY，未修改任何记录" }
+        require(quantity in 1..MAX_QUANTITY.toLong()) { tr(TextKey.MERGED_QUANTITY_EXCEEDS_NO_RECORDS_WERE_CHANGED, MAX_QUANTITY) }
         val details = sources.filter { it.location.isNotEmpty() || it.note.isNotEmpty() }.map { source ->
-            "合并来源 ${source.quantity} 件" + (if (source.location.isNotEmpty()) "，库位 ${source.location}" else "") +
+            tr(TextKey.MERGED_SOURCE_PCS, source.quantity) + (if (source.location.isNotEmpty()) tr(TextKey.LOCATION, source.location) else "") +
                 (if (source.note.isNotEmpty()) "：${source.note}" else "")
         }
         val now = maxOf(System.currentTimeMillis(), target.updatedAt, sources.maxOf { it.updatedAt })
@@ -591,7 +593,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         val auditAfter = JSONObject(recordJson(after)).put("mergedSources", JSONArray().apply {
             sources.forEach { put(JSONObject(recordJson(it))) }
         }).toString()
-        require(auditAfter.length <= 65536) { "合并来源过多，请分批合并" }
+        require(auditAfter.length <= 65536) { tr(TextKey.TOO_MANY_MERGE_SOURCES_MERGE_IN_SMALLER_BATCHES) }
         insertChange(db, ChangeLog(newId(), target.id, "UPDATE", recordJson(target), auditAfter, now))
         if (consumeSources) sources.forEach {
             db.delete("changes", "record_id = ?", arrayOf(it.id))
@@ -661,59 +663,59 @@ class InventoryRepository(context: Context) : AutoCloseable {
         validateId(record.id)
         validateId(record.taskId)
         validateId(record.warehouseId)
-        require(record.condition in CONDITIONS) { "物品状态须为正常、损坏或待核查" }
-        val pending = record.condition == "待核查"
+        require(record.condition in CONDITIONS) { tr(TextKey.CONDITION_MUST_BE_NORMAL_DAMAGED_OR_PENDING_VERIFICATION) }
+        val pending = record.condition == StockCondition.PENDING
         require(!pending || record.bom.isNotEmpty() || record.sn.isNotEmpty() || record.note.isNotBlank()) {
-            "待核查草稿至少填写一个编号或备注"
+            tr(TextKey.PENDING_DRAFTS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
         }
         if (!pending || record.bom.isNotEmpty()) {
             IdentifierRules.validateBom(record.bom)?.let { throw IllegalArgumentException(it) }
         }
-        require(record.bom == record.bom.trim()) { "BOM 包含首尾空格" }
+        require(record.bom == record.bom.trim()) { tr(TextKey.BOM_HAS_LEADING_OR_TRAILING_SPACES) }
         if (record.kind == ItemKind.MACHINE) {
             if (!pending || record.sn.isNotEmpty()) {
                 IdentifierRules.validateSn(record.sn)?.let { throw IllegalArgumentException(it) }
             }
-            require(record.sn == record.sn.trim()) { "SN 包含首尾空格" }
-            require(record.quantity == 1) { "整机数量必须为 1" }
+            require(record.sn == record.sn.trim()) { tr(TextKey.SN_HAS_LEADING_OR_TRAILING_SPACES) }
+            require(record.quantity == 1) { tr(TextKey.MACHINE_QUANTITY_MUST_BE_1) }
         } else {
-            require(record.sn.isEmpty()) { "配件不能填写 SN" }
-            require(record.quantity in 1..MAX_QUANTITY) { "配件数量必须在 1 到 $MAX_QUANTITY 之间" }
+            require(record.sn.isEmpty()) { tr(TextKey.PARTS_MUST_NOT_HAVE_AN_SN) }
+            require(record.quantity in 1..MAX_QUANTITY) { tr(TextKey.PARTS_QUANTITY_MUST_BE_BETWEEN_1_AND, MAX_QUANTITY) }
         }
-        require(record.note.length <= 4000) { "备注不能超过 4000 字" }
-        require(record.location.length <= 100 && record.location.none(Char::isISOControl)) { "库位不能超过 100 字，不能包含换行" }
-        require(record.sourceBom in SOURCES && record.sourceSn in SOURCES) { "编号录入来源无效" }
-        require(record.rawBom.length <= 4000 && record.rawSn.length <= 4000) { "识别原文过长" }
-        require(record.createdAt >= 0 && record.updatedAt >= record.createdAt) { "库存记录时间无效" }
+        require(record.note.length <= 4000) { tr(TextKey.NOTES_MUST_NOT_EXCEED_4000_CHARACTERS) }
+        require(record.location.length <= 100 && record.location.none(Char::isISOControl)) { tr(TextKey.LOCATION_MUST_NOT_EXCEED_100_CHARACTERS_OR_CONTAIN_LINE) }
+        require(record.sourceBom in SOURCES && record.sourceSn in SOURCES) { tr(TextKey.INVALID_IDENTIFIER_INPUT_SOURCE) }
+        require(record.rawBom.length <= 4000 && record.rawSn.length <= 4000) { tr(TextKey.RAW_RECOGNIZED_TEXT_IS_TOO_LONG) }
+        require(record.createdAt >= 0 && record.updatedAt >= record.createdAt) { tr(TextKey.INVALID_INVENTORY_RECORD_TIMESTAMP) }
     }
 
     private fun validateChange(change: ChangeLog, taskIds: Set<String>, warehouseIds: Set<String>) {
-        require(change.action in setOf("CREATE", "UPDATE", "VOID", "RESTORE")) { "修改历史操作无效" }
-        require(change.at >= 0) { "修改历史时间无效" }
-        require(change.before.length <= 65536 && change.after.length <= 65536) { "修改历史内容过长" }
+        require(change.action in setOf("CREATE", "UPDATE", "VOID", "RESTORE")) { tr(TextKey.INVALID_CHANGE_HISTORY_ACTION) }
+        require(change.at >= 0) { tr(TextKey.INVALID_CHANGE_HISTORY_TIMESTAMP) }
+        require(change.before.length <= 65536 && change.after.length <= 65536) { tr(TextKey.CHANGE_HISTORY_CONTENT_IS_TOO_LONG) }
         val before = parseAuditJson(change.before)
         val after = parseAuditJson(change.after)
-        require((change.action == "CREATE") == (before.length() == 0)) { "修改历史的修改前记录与操作不符" }
-        require(after.length() != 0) { "修改历史缺少修改后记录" }
+        require((change.action == "CREATE") == (before.length() == 0)) { tr(TextKey.THE_BEFORE_RECORD_IN_CHANGE_HISTORY_DOES_NOT_MATCH) }
+        require(after.length() != 0) { tr(TextKey.CHANGE_HISTORY_IS_MISSING_THE_AFTER_RECORD) }
         for (json in listOf(before, after)) {
             if (json.length() == 0) {
-                require(change.action == "CREATE" && json === before) { "修改历史缺少修改前记录" }
+                require(change.action == "CREATE" && json === before) { tr(TextKey.CHANGE_HISTORY_IS_MISSING_THE_BEFORE_RECORD) }
                 continue
             }
             val record = recordFromJson(json)
             validateRecord(record)
-            require(record.id == change.recordId) { "修改历史记录 ID 不一致" }
-            require(record.taskId in taskIds && record.warehouseId in warehouseIds) { "修改历史关联无效" }
+            require(record.id == change.recordId) { tr(TextKey.CHANGE_HISTORY_RECORD_IDS_DO_NOT_MATCH) }
+            require(record.taskId in taskIds && record.warehouseId in warehouseIds) { tr(TextKey.INVALID_CHANGE_HISTORY_REFERENCES) }
         }
         if (change.action == "RESTORE") {
-            require(before.getBoolean("voided") && !after.getBoolean("voided")) { "还原历史的作废状态不正确" }
+            require(before.getBoolean("voided") && !after.getBoolean("voided")) { tr(TextKey.INVALID_VOIDED_STATE_IN_RESTORE_HISTORY) }
         }
     }
 
     private fun parseAuditJson(value: String): JSONObject = try {
         JSONObject(value)
     } catch (e: Exception) {
-        throw IllegalArgumentException("修改历史 JSON 无效", e)
+        throw IllegalArgumentException(tr(TextKey.INVALID_CHANGE_HISTORY_JSON), e)
     }
 
     private fun recordFromJson(json: JSONObject): StockRecord = try {
@@ -724,7 +726,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             json.getString("rawSn"), json.getLong("createdAt"), json.getLong("updatedAt"),
             json.getBoolean("voided"))
     } catch (e: Exception) {
-        throw IllegalArgumentException("修改历史缺少完整库存记录", e)
+        throw IllegalArgumentException(tr(TextKey.CHANGE_HISTORY_IS_MISSING_A_COMPLETE_INVENTORY_RECORD), e)
     }
 
     private fun recordJson(record: StockRecord): String = JSONObject().apply {
@@ -824,9 +826,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
         incoming.forEach { item ->
             val itemId = id(item)
             validateId(itemId)
-            require(incomingIds.add(itemId)) { "备份中的$label ID 重复：$itemId" }
+            require(incomingIds.add(itemId)) { tr(TextKey.DUPLICATE_ID_IN_BACKUP, label, itemId) }
             val existing = combined[itemId]
-            require(existing == null || equivalent(existing, item)) { "$label ID 已存在但内容不同，未导入：$itemId" }
+            require(existing == null || equivalent(existing, item)) { tr(TextKey.ID_EXISTS_WITH_DIFFERENT_CONTENT_NOTHING_WAS_IMPORTED, label, itemId) }
             combined[itemId] = existing ?: item
         }
         return combined
@@ -854,12 +856,12 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     private fun checkedName(value: String, label: String): String = value.trim().also {
         require(it.isNotEmpty() && it.length <= 100 && it.none(Char::isISOControl)) {
-            "${label}名称须为 1 至 100 字，不能包含换行或控制字符"
+            tr(TextKey.NAME_MUST_CONTAIN_1_TO_100_CHARACTERS_WITH_NO, label)
         }
     }
 
     private fun validateId(value: String) {
-        require(ID_PATTERN.matches(value)) { "数据 ID 无效" }
+        require(ID_PATTERN.matches(value)) { tr(TextKey.INVALID_DATA_ID) }
     }
 
     private fun nameKey(value: String) = value.lowercase(Locale.ROOT)
@@ -906,7 +908,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            require(oldVersion in 1..3 && newVersion == 4) { "未支持的数据库升级：$oldVersion → $newVersion" }
+            require(oldVersion in 1..3 && newVersion == 4) { tr(TextKey.UNSUPPORTED_DATABASE_UPGRADE, oldVersion, newVersion) }
             if (oldVersion < 3) {
             // Preserve every old record. For serials previously repeated in different tasks,
             // keep the latest edited record active and audit the others as voided.
@@ -955,6 +957,6 @@ class InventoryRepository(context: Context) : AutoCloseable {
         private const val MAX_QUANTITY = 1_000_000_000
         private val ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
         private val SOURCES = setOf("manual", "ocr", "import")
-        private val CONDITIONS = setOf("正常", "损坏", "待核查")
+        private val CONDITIONS = setOf(StockCondition.NORMAL, StockCondition.DAMAGED, StockCondition.PENDING)
     }
 }

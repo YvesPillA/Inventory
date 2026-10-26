@@ -30,7 +30,7 @@ class ExportRecoveryInstrumentedTest {
         val storeA = ViewModelStore()
         val storeB = ViewModelStore()
         // Export only changes these UI preferences, never inventory rows. Preserve prior values.
-        val preservedKeys = listOf("task", "warehouse", "last_export", "backup_at")
+        val preservedKeys = listOf("task", "warehouse", "last_export", "backup_at", "last_export_at", "last_export_kind", "last_export_label")
         val previousPreferences = preservedKeys.associateWith { preferences.all[it] }
         clearPending(application)
 
@@ -102,7 +102,7 @@ class ExportRecoveryInstrumentedTest {
 
     private fun clearPending(application: Application) {
         application.getSharedPreferences("fieldstock", 0).edit()
-            .remove("pending_kind").remove("pending_task").remove("pending_warehouse").commit()
+            .remove("pending_kind").remove("pending_task").remove("pending_warehouse").remove("pending_language").commit()
         File(application.cacheDir, "pending-export.json").delete()
     }
 }

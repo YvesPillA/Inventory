@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.i18n.*
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,7 +60,7 @@ internal fun LiveScanOverlay(codes: List<TrackedCode>, roi: CodeBox, enabled: Bo
                     .clip(RoundedCornerShape(6.dp)).background(MarkerBlue.copy(alpha = 0.94f))
                     .border(1.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
                     .clickable(enabled = enabled) { select(marker.code) }
-                    .semantics { contentDescription = "画面编号 ${marker.number} $value" }.padding(horizontal = 10.dp),
+                    .semantics { contentDescription = tr(TextKey.ON_SCREEN_CODE, marker.number, value) }.padding(horizontal = 10.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
                 Text("${marker.number}  $value", color = Color.White, fontFamily = FontFamily.Monospace,
@@ -72,8 +74,8 @@ internal fun LiveScanOverlay(codes: List<TrackedCode>, roi: CodeBox, enabled: Bo
 internal fun LiveCodeList(codes: List<TrackedCode>, paused: Boolean, enabled: Boolean, select: (TrackedCode) -> Unit) {
     Column(Modifier.fillMaxWidth().height(144.dp).background(Color.White).padding(horizontal = 12.dp, vertical = 6.dp)) {
         Text(
-            if (codes.isEmpty()) if (paused) "此画面未找到合规编号，请继续识别" else "停稳片刻，框内编号会逐行显示"
-            else "${if (paused) "画面已暂停" else "持续识别中"} · ${codes.size} 个编号，可滑动点选",
+            if (codes.isEmpty()) if (paused) tr(TextKey.NO_VALID_IDENTIFIERS_IN_THIS_FRAME_CONTINUE_SCANNING) else tr(TextKey.HOLD_STILL_BRIEFLY_TO_SEE_IDENTIFIERS_LINE_BY_LINE)
+            else tr(TextKey.IDENTIFIERS_SCROLL_TO_SELECT, if (paused) tr(TextKey.FRAME_PAUSED) else tr(TextKey.SCANNING_CONTINUOUSLY), codes.size),
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(bottom = 4.dp),
         )
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -81,12 +83,12 @@ internal fun LiveCodeList(codes: List<TrackedCode>, paused: Boolean, enabled: Bo
                 Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(6.dp)).background(Color(0xFFE8F0FE))
                     .clickable(enabled = enabled) { select(hit) }
-                    .semantics { contentDescription = "列表编号 ${index + 1} ${hit.code.candidate.value}" }
+                    .semantics { contentDescription = tr(TextKey.LISTED_CODE, index + 1, hit.code.candidate.value) }
                     .padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("${index + 1}", color = MarkerBlue, fontSize = 13.sp, modifier = Modifier.width(28.dp))
                     Text(hit.code.candidate.value, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
                         fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    Text("点选", color = MarkerBlue, fontSize = 12.sp)
+                    Text(tr(TextKey.SELECT_2), color = MarkerBlue, fontSize = 12.sp)
                 }
             }
         }

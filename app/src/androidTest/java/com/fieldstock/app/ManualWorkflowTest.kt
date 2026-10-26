@@ -20,6 +20,8 @@ import androidx.test.runner.lifecycle.Stage
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.backup.AutomaticBackups
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.i18n.AppLanguage
+import com.fieldstock.app.i18n.LanguageSettings
 import com.fieldstock.app.scan.ScanActivity
 import com.fieldstock.app.scan.CodeBox
 import com.fieldstock.app.scan.LiveTextLine
@@ -47,6 +49,7 @@ class ManualWorkflowTest {
         context = ApplicationProvider.getApplicationContext()
         context.databaseList().forEach { context.deleteDatabase(it) }
         context.getSharedPreferences("fieldstock", 0).edit().clear().commit()
+        LanguageSettings.select(context, AppLanguage.CHINESE)
         File(context.filesDir, "automatic-backups").deleteRecursively()
         File(context.cacheDir, "shared-backups").deleteRecursively()
         InventoryRepository(context).use {

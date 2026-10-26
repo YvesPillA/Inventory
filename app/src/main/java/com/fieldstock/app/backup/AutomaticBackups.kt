@@ -1,5 +1,7 @@
 package com.fieldstock.app.backup
 
+import com.fieldstock.app.i18n.*
+
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.model.InventorySnapshot
 import java.io.File
@@ -39,7 +41,7 @@ class AutomaticBackups(
     }
 
     fun create(snapshot: InventorySnapshot): AutomaticBackup {
-        check(directory.isDirectory || directory.mkdirs()) { "无法创建备份目录，请检查手机存储空间" }
+        check(directory.isDirectory || directory.mkdirs()) { tr(TextKey.COULD_NOT_CREATE_THE_BACKUP_FOLDER_CHECK_AVAILABLE_STORAGE) }
         val now = currentClock()
         val at = now.millis()
         val day = LocalDate.now(now)
@@ -52,14 +54,14 @@ class AutomaticBackups(
                 output.fd.sync()
             }
             val restored = temporary.inputStream().use(InventoryFiles::readBackup)
-            check(restored == snapshot) { "备份回读与库存不一致，未替换已有备份" }
-            check(temporary.renameTo(destination)) { "无法保存完整备份，请检查手机存储空间" }
+            check(restored == snapshot) { tr(TextKey.BACKUP_VERIFICATION_DIFFERS_FROM_INVENTORY_EXISTING_BACKUPS_WERE_KEPT) }
+            check(temporary.renameTo(destination)) { tr(TextKey.COULD_NOT_SAVE_THE_FULL_BACKUP_CHECK_AVAILABLE_STORAGE) }
             verified += destination.name
             val entry = AutomaticBackup(destination.name, at, day, destination.length())
             // Retain the newly created file even after the phone's clock moves backwards.
             val stale = entries().filter { it.id != entry.id }.drop(KEEP - 1)
             check(stale.all { fileFor(it.id).delete().also { removed -> if (removed) verified -= it.id } }) {
-                "新备份已保存，部分旧备份暂未清理，请稍后重试"
+                tr(TextKey.NEW_BACKUP_SAVED_SOME_OLDER_BACKUPS_COULD_NOT_BE)
             }
             return entry
         } finally {
@@ -76,7 +78,7 @@ class AutomaticBackups(
     }
 
     private fun fileFor(id: String): File {
-        require(NAME.matches(id)) { "备份文件名称无效" }
+        require(NAME.matches(id)) { tr(TextKey.INVALID_BACKUP_FILENAME) }
         return File(directory, id)
     }
 

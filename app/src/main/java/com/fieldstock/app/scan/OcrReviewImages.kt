@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.i18n.*
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -11,7 +13,7 @@ internal class OcrReviewImages(context: Context) {
     private val directory = File(context.cacheDir, "ocr-review")
 
     fun save(bitmap: Bitmap): String {
-        check(directory.isDirectory || directory.mkdirs()) { "无法暂存标签照片" }
+        check(directory.isDirectory || directory.mkdirs()) { tr(TextKey.COULD_NOT_CACHE_THE_LABEL_PHOTO) }
         val id = "review-${UUID.randomUUID()}.jpg"
         val file = File(directory, id)
         val ratio = minOf(1f, MAX_EDGE.toFloat() / maxOf(bitmap.width, bitmap.height))

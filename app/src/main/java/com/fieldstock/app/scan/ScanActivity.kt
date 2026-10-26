@@ -8,7 +8,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -76,6 +75,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.fieldstock.app.model.IdentifierRules
+import com.fieldstock.app.i18n.*
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
@@ -91,7 +91,7 @@ import kotlinx.coroutines.delay
  * Only a deliberate confirmation returns RESULT_OK, with extras "value" and "raw".
  * The cropped review photo is temporary private cache, removed on rescan/exit.
  */
-class ScanActivity : ComponentActivity() {
+class ScanActivity : LocalizedActivity() {
     private var field = IdentifierField.BOM
     private var hasPermission by mutableStateOf(false)
     private var permissionDenied by mutableStateOf(false)
@@ -233,23 +233,23 @@ class ScanActivity : ComponentActivity() {
                             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            TextButton(onClick = { finish() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("返回") }
+                            TextButton(onClick = { finish() }, modifier = Modifier.heightIn(min = 48.dp)) { Text(tr(TextKey.BACK)) }
                             Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                                Text("扫描 ${field.name} 编号", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                                Text("本机识别 · 确认后填入", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                Text(tr(TextKey.SCAN_IDENTIFIER, field.name), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text(tr(TextKey.ON_DEVICE_RECOGNITION_REVIEW_BEFORE_FILLING), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             }
                         }
                         HorizontalDivider(color = Color(0xFFE0E7F0))
                         if (!showResult) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (!continuous) Button(onClick = { changeScanMode(false) }, enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("单次识别") }
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(tr(TextKey.SINGLE_SCAN)) }
                             else OutlinedButton(onClick = { changeScanMode(false) }, enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("单次识别") }
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(tr(TextKey.SINGLE_SCAN)) }
                             if (continuous) Button(onClick = { changeScanMode(true) }, enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("持续识别") }
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(tr(TextKey.CONTINUOUS_SCAN)) }
                             else OutlinedButton(onClick = { changeScanMode(true) }, enabled = !busy,
-                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text("持续识别") }
+                                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(tr(TextKey.CONTINUOUS_SCAN)) }
                         }
                     }
                 }
@@ -278,11 +278,11 @@ class ScanActivity : ComponentActivity() {
             modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
             verticalArrangement = Arrangement.Center,
         ) {
-            Text("用相机读取标签编号", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Text(tr(TextKey.READ_LABEL_IDENTIFIERS_WITH_THE_CAMERA), fontSize = 26.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
             Text(
-                if (permissionDenied) "相机权限未开启。你可以再次授权，或返回盘库表单手动输入。"
-                else "对准标签上的印刷数字和字母。识别在手机上完成，无需联网。",
+                if (permissionDenied) tr(TextKey.CAMERA_PERMISSION_IS_OFF_ALLOW_ACCESS_AGAIN_OR_RETURN)
+                else tr(TextKey.AIM_AT_THE_PRINTED_LETTERS_AND_DIGITS_ON_THE),
                 fontSize = 16.sp,
                 lineHeight = 25.sp,
             )
@@ -290,14 +290,14 @@ class ScanActivity : ComponentActivity() {
             Button(
                 onClick = { permissionRequest.launch(Manifest.permission.CAMERA) },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-            ) { Text(if (permissionDenied) "再次申请相机权限" else "允许使用相机") }
+            ) { Text(if (permissionDenied) tr(TextKey.REQUEST_CAMERA_PERMISSION_AGAIN) else tr(TextKey.ALLOW_CAMERA_ACCESS)) }
             if (permissionDenied && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
                 OutlinedButton(
                     onClick = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                ) { Text("到设置开启相机") }
+                ) { Text(tr(TextKey.ENABLE_CAMERA_IN_SETTINGS)) }
             }
-            TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回手动输入") }
+            TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.ENTER_MANUALLY)) }
         }
     }
 
@@ -319,13 +319,13 @@ class ScanActivity : ComponentActivity() {
                 )
                 val frozen = liveFrame
                 if (frozen != null && (livePaused || !hasPermission)) {
-                    Image(frozen.scene.asImageBitmap(), contentDescription = "已暂停的扫描画面",
+                    Image(frozen.scene.asImageBitmap(), contentDescription = tr(TextKey.PAUSED_SCAN_FRAME),
                         contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
                 }
                 Viewfinder(Modifier.fillMaxSize())
                 if (continuous && frozen != null) LiveScanOverlay(visibleLiveCodes, frozen.roi, !busy, ::chooseLiveCode)
                 if (!continuous) Text(
-                    "将 ${field.name} 一整行放入框内",
+                    tr(TextKey.PLACE_THE_COMPLETE_LINE_INSIDE_THE_FRAME, field.name),
                     color = Color.White,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp)
@@ -335,7 +335,7 @@ class ScanActivity : ComponentActivity() {
                     Box(Modifier.fillMaxSize().background(Color(0x66122338)), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             CircularProgressIndicator(color = Color.White)
-                            Text("正在识别框内文字…", color = Color.White)
+                            Text(tr(TextKey.RECOGNIZING_TEXT_INSIDE_THE_FRAME), color = Color.White)
                         }
                     }
                 }
@@ -344,8 +344,8 @@ class ScanActivity : ComponentActivity() {
             Column(Modifier.fillMaxWidth().background(Color(0xFFF4F7FC)).padding(horizontal = 16.dp, vertical = if (continuous) 4.dp else 12.dp)) {
                 if (!continuous) {
                   Text(
-                    if (field == IdentifierField.SN) "SN 含一个 -，字母和数字合计最多 14 位。"
-                    else "BOM 支持数字和英文字母，最多 14 位。",
+                    if (field == IdentifierField.SN) tr(TextKey.SN_CONTAINS_ONE_HYPHEN_AND_UP_TO_14_LETTERS)
+                    else tr(TextKey.BOM_SUPPORTS_UP_TO_14_LETTERS_AND_DIGITS),
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                   )
@@ -390,21 +390,21 @@ class ScanActivity : ComponentActivity() {
             TextButton(
                 onClick = { previewView?.let { bindCamera(it) } },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text("重新打开相机") }
+            ) { Text(tr(TextKey.REOPEN_CAMERA)) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(
                 onClick = { toggleTorch() },
                 enabled = cameraReady && torchAvailable && !busy,
                 modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-            ) { Text(if (cameraReady && !torchAvailable) "无补光灯" else if (torchEnabled) "关闭补光" else "打开补光") }
+            ) { Text(if (cameraReady && !torchAvailable) tr(TextKey.NO_TORCH) else if (torchEnabled) tr(TextKey.TORCH_OFF) else tr(TextKey.TORCH_ON)) }
             Button(
                 onClick = { if (continuous) pauseOrResumeLive() else recognizeFrame() },
                 enabled = !busy && if (continuous) liveFrame != null else cameraReady && !processingFrame,
                 modifier = Modifier.weight(1.6f).heightIn(min = 52.dp),
-            ) { Text(if (busy) "正在打开核对…" else if (continuous) if (livePaused) "继续识别" else "暂停画面" else "识别框内编号", fontWeight = FontWeight.Bold) }
+            ) { Text(if (busy) tr(TextKey.OPENING_REVIEW) else if (continuous) if (livePaused) tr(TextKey.RESUME_SCANNING) else tr(TextKey.PAUSE_FRAME) else tr(TextKey.RECOGNIZE_IDENTIFIER), fontWeight = FontWeight.Bold) }
         }
-        if (!continuous) TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回手动输入") }
+        if (!continuous) TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.ENTER_MANUALLY)) }
     }
 
     @Composable
@@ -414,16 +414,16 @@ class ScanActivity : ComponentActivity() {
             modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text("核对标签后再填入", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("对照照片核对 0/O、1/I、8/B，保留前导零和大小写。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(tr(TextKey.CHECK_THE_LABEL_BEFORE_FILLING), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(tr(TextKey.COMPARE_WITH_THE_PHOTO_CHECK_0_O_1_I), color = MaterialTheme.colorScheme.onSurfaceVariant)
             reviewPhoto?.let { photo -> LabelPhoto(photo) }
-                ?: Text("标签照片暂不可用。请对照实物核对，或重新扫描。", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                ?: Text(tr(TextKey.LABEL_PHOTO_UNAVAILABLE_CHECK_THE_PHYSICAL_LABEL_OR_SCAN), color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             if (candidates.isEmpty()) {
                 Surface(color = Color(0xFFFFF1D6), shape = RoundedCornerShape(8.dp)) {
-                    Text("没有找到符合格式的 ${field.name}。请重扫，或在下方手动输入。", Modifier.padding(14.dp))
+                    Text(tr(TextKey.NO_VALID_FOUND_SCAN_AGAIN_OR_ENTER_IT_MANUALLY, field.name), Modifier.padding(14.dp))
                 }
             } else {
-                Text(if (candidates.size > 1) "发现 ${candidates.size} 个候选，请点选正确编号" else "识别候选", fontWeight = FontWeight.SemiBold)
+                Text(if (candidates.size > 1) tr(TextKey.FOUND_CANDIDATES_SELECT_THE_CORRECT_IDENTIFIER, candidates.size) else tr(TextKey.RECOGNIZED_CANDIDATES), fontWeight = FontWeight.SemiBold)
                 candidates.forEach { candidate ->
                     val selected = selectedCandidate == candidate
                     Column(
@@ -436,10 +436,10 @@ class ScanActivity : ComponentActivity() {
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text(candidate.value, fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                            Text(if (selected) "已选择" else "点选", color = Color(0xFF125BCB), fontSize = 13.sp)
+                            Text(if (selected) tr(TextKey.SELECTED_2) else tr(TextKey.SELECT_2), color = Color(0xFF125BCB), fontSize = 13.sp)
                         }
                         if (candidate.corrections.isNotEmpty()) {
-                            Text("原文：${candidate.raw}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(tr(TextKey.ORIGINAL, candidate.raw), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             candidate.corrections.forEach { Text(it, fontSize = 13.sp, color = Color(0xFF805600)) }
                         }
                     }
@@ -448,9 +448,9 @@ class ScanActivity : ComponentActivity() {
             OutlinedTextField(
                 value = editedValue,
                 onValueChange = { editedValue = it },
-                label = { Text("最终 ${field.name} 编号") },
+                label = { Text(tr(TextKey.FINAL_IDENTIFIER, field.name)) },
                 supportingText = {
-                    Text(validation ?: if (field == IdentifierField.SN) "格式有效，请与标签逐字核对。" else "格式有效，请核对前导零和字母。")
+                    Text(validation ?: if (field == IdentifierField.SN) tr(TextKey.VALID_FORMAT_CHECK_EACH_CHARACTER_AGAINST_THE_LABEL) else tr(TextKey.VALID_FORMAT_CHECK_LEADING_ZEROS_AND_LETTERS))
                 },
                 isError = editedValue.isNotEmpty() && validation != null,
                 singleLine = true,
@@ -458,9 +458,9 @@ class ScanActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth(),
             )
             CharacterReview(editedValue) { editedValue = it }
-            Text("本次识别原文", fontWeight = FontWeight.SemiBold)
+            Text(tr(TextKey.RAW_RECOGNIZED_TEXT), fontWeight = FontWeight.SemiBold)
             Surface(color = Color(0xFFEAF0F7), shape = RoundedCornerShape(8.dp)) {
-                Text(rawText.ifBlank { "未识别到文字" }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                Text(rawText.ifBlank { tr(TextKey.NO_TEXT_RECOGNIZED) }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -472,7 +472,7 @@ class ScanActivity : ComponentActivity() {
             OutlinedButton(
                 onClick = { rescan() },
                 modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-            ) { Text("重新扫描") }
+            ) { Text(tr(TextKey.SCAN_AGAIN)) }
             Button(
                 onClick = {
                     if (validationError() == null) {
@@ -482,7 +482,7 @@ class ScanActivity : ComponentActivity() {
                 },
                 enabled = validationError() == null,
                 modifier = Modifier.weight(1.6f).heightIn(min = 52.dp),
-            ) { Text("确认并填入", fontWeight = FontWeight.Bold) }
+            ) { Text(tr(TextKey.CONFIRM_AND_FILL), fontWeight = FontWeight.Bold) }
         }
     }
 
@@ -532,7 +532,7 @@ class ScanActivity : ComponentActivity() {
             error = null
         } else {
             clearLive()
-            error = "画面已更新，请停稳后再暂停"
+            error = tr(TextKey.THE_FRAME_CHANGED_HOLD_STILL_BEFORE_PAUSING_AGAIN)
         }
     }
 
@@ -542,7 +542,7 @@ class ScanActivity : ComponentActivity() {
         liveRevision++
         if (SystemClock.elapsedRealtime() - capturedAt > LIVE_FRESH_MS) {
             livePaused = true
-            error = "本次识别较慢，已暂停画面；可点选编号或继续识别"
+            error = tr(TextKey.RECOGNITION_TOOK_LONGER_THAN_EXPECTED_SO_THE_FRAME_WAS)
         } else error = null
     }
 
@@ -576,7 +576,7 @@ class ScanActivity : ComponentActivity() {
                     if (activityAlive && generation == recognitionGeneration && operation == liveOperation) {
                         liveFrame = null
                         liveTracker.reset()
-                        error = "持续识别暂未成功，请调整光线、停稳后重试"
+                        error = tr(TextKey.CONTINUOUS_RECOGNITION_FAILED_ADJUST_THE_LIGHTING_HOLD_STILL_AND)
                     }
                 }
                 .addOnCompleteListener {
@@ -586,7 +586,7 @@ class ScanActivity : ComponentActivity() {
         } catch (_: Exception) {
             processingFrame = false
             crop.recycle(); scene.recycle()
-            error = "持续识别暂不可用，可切换单次识别或手动输入"
+            error = tr(TextKey.CONTINUOUS_RECOGNITION_IS_UNAVAILABLE_USE_SINGLE_SCAN_OR_MANUAL)
         }
     }
 
@@ -595,7 +595,7 @@ class ScanActivity : ComponentActivity() {
         val frame = liveFrame ?: return
         val current = visibleLiveCodes.find { it.id == hit.id && it.code.candidate.value == hit.code.candidate.value }
         if (current == null || (!livePaused && SystemClock.elapsedRealtime() - frame.capturedAt > LIVE_FRESH_MS)) {
-            error = "这个编号已移出画面，请重新点选，或先暂停画面"
+            error = tr(TextKey.THIS_IDENTIFIER_HAS_LEFT_THE_FRAME_SELECT_IT_AGAIN)
             return
         }
         livePaused = true
@@ -643,7 +643,7 @@ class ScanActivity : ComponentActivity() {
                 cameraReady = true
             } catch (_: Exception) {
                 cameraReady = false
-                error = "无法打开后置相机，请关闭其他相机应用后重试，或返回手动输入。"
+                error = tr(TextKey.COULD_NOT_OPEN_THE_REAR_CAMERA_CLOSE_OTHER_CAMERA)
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -675,11 +675,11 @@ class ScanActivity : ComponentActivity() {
                     future.get()
                     torchEnabled = desired
                 } catch (_: Exception) {
-                    error = "补光灯暂不可用，请调整现场光线后重试。"
+                    error = tr(TextKey.TORCH_UNAVAILABLE_ADJUST_THE_LIGHTING_AND_TRY_AGAIN)
                 }
             }, ContextCompat.getMainExecutor(this))
         } catch (_: Exception) {
-            error = "补光灯暂不可用，请调整现场光线后重试。"
+            error = tr(TextKey.TORCH_UNAVAILABLE_ADJUST_THE_LIGHTING_AND_TRY_AGAIN)
         }
     }
 
@@ -687,7 +687,7 @@ class ScanActivity : ComponentActivity() {
         if (busy || processingFrame || showResult || !cameraReady) return
         val snapshot = previewView?.bitmap
         if (snapshot == null || snapshot.width < 2 || snapshot.height < 2) {
-            error = "相机画面尚未就绪，请稍后再次点击识别。"
+            error = tr(TextKey.CAMERA_PREVIEW_IS_NOT_READY_TRY_RECOGNIZING_AGAIN_SHORTLY)
             return
         }
         val crop = try {
@@ -698,7 +698,7 @@ class ScanActivity : ComponentActivity() {
             Bitmap.createBitmap(snapshot, left, top, right - left, bottom - top)
         } catch (_: Exception) {
             snapshot.recycle()
-            error = "无法读取取景画面，请重新扫描。"
+            error = tr(TextKey.COULD_NOT_READ_THE_CAMERA_PREVIEW_SCAN_AGAIN)
             return
         }
         if (crop !== snapshot) snapshot.recycle()
@@ -714,7 +714,7 @@ class ScanActivity : ComponentActivity() {
                     if (!activityAlive || generation != recognitionGeneration) return@addOnSuccessListener
                     if (result.text.isBlank()) {
                         busy = false
-                        error = "未识别到文字。请靠近标签、保持清晰后重试，也可返回手动输入。"
+                        error = tr(TextKey.NO_TEXT_RECOGNIZED_MOVE_CLOSER_AND_KEEP_THE_LABEL)
                     } else {
                         // The ML task releases crop on completion; the IO job owns this separate copy.
                         val picture = crop.copy(Bitmap.Config.ARGB_8888, false)
@@ -738,14 +738,14 @@ class ScanActivity : ComponentActivity() {
                 .addOnFailureListener {
                     if (!activityAlive || generation != recognitionGeneration) return@addOnFailureListener
                     busy = false
-                    error = "识别失败。请调整光线后重试，或返回手动输入。"
+                    error = tr(TextKey.RECOGNITION_FAILED_ADJUST_THE_LIGHTING_AND_TRY_AGAIN_OR)
                 }
                 .addOnCompleteListener { processingFrame = false; if (!crop.isRecycled) crop.recycle() }
         } catch (_: Exception) {
             if (!crop.isRecycled) crop.recycle()
             busy = false
             processingFrame = false
-            error = "识别暂不可用，请重试或返回手动输入。"
+            error = tr(TextKey.RECOGNITION_UNAVAILABLE_TRY_AGAIN_OR_ENTER_IDENTIFIERS_MANUALLY)
         }
     }
 
@@ -779,8 +779,8 @@ private fun LabelPhoto(photo: Bitmap) {
     var offset by remember(photo) { mutableStateOf(Offset.Zero) }
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("本次标签局部照片", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-            TextButton(onClick = { scale = 1f; offset = Offset.Zero }) { Text("重置照片") }
+            Text(tr(TextKey.CROPPED_LABEL_PHOTO), Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+            TextButton(onClick = { scale = 1f; offset = Offset.Zero }) { Text(tr(TextKey.RESET_PHOTO)) }
         }
         Box(Modifier.fillMaxWidth().height(150.dp).background(Color.White).clipToBounds()
             .pointerInput(photo) {
@@ -791,11 +791,11 @@ private fun LabelPhoto(photo: Bitmap) {
                     offset = Offset((offset.x + pan.x).coerceIn(-x, x), (offset.y + pan.y).coerceIn(-y, y))
                 }
             }) {
-            Image(photo.asImageBitmap(), contentDescription = "本次识别标签照片，可双指放大",
+            Image(photo.asImageBitmap(), contentDescription = tr(TextKey.RECOGNIZED_LABEL_PHOTO_PINCH_TO_ZOOM),
                 contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().graphicsLayer {
                     scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y
                 })
         }
-        Text("双指放大、拖动核对。照片仅暂存，退出扫描后清除。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(tr(TextKey.PINCH_TO_ZOOM_AND_DRAG_TO_REVIEW_THE_PHOTO), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

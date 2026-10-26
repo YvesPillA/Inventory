@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -18,6 +19,7 @@ import com.fieldstock.app.importdata.ImportRow
 import com.fieldstock.app.importdata.InventoryImport
 import com.fieldstock.app.importdata.ImportPreview
 import com.fieldstock.app.model.*
+import com.fieldstock.app.i18n.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -28,7 +30,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-data class PendingExport(val kind: String, val snapshot: InventorySnapshot, val taskId: String?, val warehouseId: String?)
+data class PendingExport(val kind: String, val snapshot: InventorySnapshot, val taskId: String?, val warehouseId: String?,
+    val language: AppLanguage = AppLanguage.current)
 private data class LoadedInventory(val snapshot: InventorySnapshot, val migrated: Int, val receipts: List<ImportReceipt>, val recovery: List<RecoveryPoint>)
 private data class AutomaticBackupStatus(val entries: List<AutomaticBackup>, val warning: String?)
 
@@ -59,7 +62,17 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var migrationVoidedCount by mutableIntStateOf(0); private set
     var restoreCandidate by mutableStateOf<InventorySnapshot?>(null)
     var pendingExport: PendingExport? = null
-    var lastExport by mutableStateOf(preferences.getString("last_export", "尚未导出") ?: "尚未导出"); private set
+    private var lastExportAt by mutableLongStateOf(preferences.getLong("last_export_at", 0))
+    private var lastExportKind by mutableStateOf(preferences.getString("last_export_kind", "").orEmpty())
+    private var lastExportWarehouse by mutableStateOf(preferences.getString("last_export_label", "").orEmpty())
+    val lastExport: String get() = if (lastExportAt == 0L) preferences.getString("last_export", null)
+        ?.takeUnless { it == TextKey.NO_EXPORTS_YET.chinese || it == TextKey.NO_EXPORTS_YET.english }
+        ?: tr(TextKey.NO_EXPORTS_YET)
+        else "${formatTime(lastExportAt)} · ${when (lastExportKind) {
+            "template" -> tr(TextKey.STANDARD_IMPORT_TEMPLATE)
+            "backup" -> tr(TextKey.FULL_BACKUP)
+            else -> lastExportWarehouse.ifEmpty { tr(TextKey.ALL_WAREHOUSES) }
+        }}"
     var lastBackupAt by mutableStateOf(preferences.getLong("backup_at", 0)); private set
     var automaticBackupEnabled by mutableStateOf(preferences.getBoolean("automatic_backup", true)); private set
     var automaticBackupEntries by mutableStateOf<List<AutomaticBackup>>(emptyList()); private set
@@ -96,7 +109,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 duplicate = e.existing
                 if (notify) testFeedback(true)
             } catch (e: Exception) {
-                error = e.message ?: "操作未完成，请重试"
+                error = e.message ?: tr(TextKey.OPERATION_INCOMPLETE_PLEASE_TRY_AGAIN)
             } finally { busy = false }
           }
         }
@@ -113,6 +126,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setVibration(enabled: Boolean) { vibrationEnabled = enabled; preferences.edit().putBoolean("feedback_vibration", enabled).apply() }
     fun setSound(enabled: Boolean) { soundEnabled = enabled; preferences.edit().putBoolean("feedback_sound", enabled).apply() }
+    fun onLanguageChanged() {
+        message = null; error = null; automaticBackupWarning = null
+        checkDailyBackup()
+    }
     fun testFeedback(duplicate: Boolean) = feedback.play(duplicate, vibrationEnabled, soundEnabled)
 
     private fun automaticStatus(force: Boolean = false): AutomaticBackupStatus {
@@ -120,7 +137,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             if (force) automaticBackups.create(repository.snapshot())
             else if (automaticBackupEnabled) automaticBackups.ensureDaily { repository.snapshot() }
         }
-        return AutomaticBackupStatus(automaticBackups.entries(), attempt.exceptionOrNull()?.let { "完整备份未完成：${it.message ?: "请检查手机存储空间"}" })
+        return AutomaticBackupStatus(automaticBackups.entries(), attempt.exceptionOrNull()?.let { tr(TextKey.FULL_BACKUP_INCOMPLETE, it.message ?: tr(TextKey.CHECK_THE_PHONE_S_AVAILABLE_STORAGE)) })
     }
 
     private fun updateAutomaticStatus(status: AutomaticBackupStatus) {
@@ -143,7 +160,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 try {
                     val status = withContext(Dispatchers.IO) { automaticStatus(force) }
                     updateAutomaticStatus(status)
-                    if (force && status.warning == null) message = "完整备份已保存到本机，可另存或分享带走"
+                    if (force && status.warning == null) message = tr(TextKey.FULL_BACKUP_SAVED_ON_THIS_PHONE_SAVE_A_COPY)
                 } finally { busy = false }
             }
         }
@@ -155,7 +172,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             operations.withLock {
                 try { restoreCandidate = withContext(Dispatchers.IO) { automaticBackups.read(id) } }
-                catch (failure: Exception) { error = "本机备份未读取：${failure.message}" }
+                catch (failure: Exception) { error = tr(TextKey.COULD_NOT_READ_LOCAL_BACKUP, failure.message) }
                 finally { busy = false }
             }
         }
@@ -170,15 +187,15 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     val application = getApplication<Application>()
                     val uri = withContext(Dispatchers.IO) {
                         val folder = File(application.cacheDir, "shared-backups")
-                        check(folder.isDirectory || folder.mkdirs()) { "无法准备分享文件" }
+                        check(folder.isDirectory || folder.mkdirs()) { tr(TextKey.COULD_NOT_PREPARE_THE_FILE_FOR_SHARING) }
                         // The ID is validated by copyTo before any file is published.
-                        require(automaticBackupEntries.any { it.id == id }) { "备份已清理，请重新选择" }
+                        require(automaticBackupEntries.any { it.id == id }) { tr(TextKey.THIS_BACKUP_HAS_BEEN_REMOVED_PLEASE_SELECT_ANOTHER) }
                         val file = File(folder, id)
                         if (!file.exists()) {
                             val temporary = File.createTempFile("sharing-", ".tmp", folder)
                             try {
                                 temporary.outputStream().use { automaticBackups.copyTo(id, it) }
-                                check(temporary.renameTo(file)) { "无法准备分享文件" }
+                                check(temporary.renameTo(file)) { tr(TextKey.COULD_NOT_PREPARE_THE_FILE_FOR_SHARING) }
                             } finally { temporary.delete() }
                         }
                         val expired = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
@@ -186,21 +203,21 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                         FileProvider.getUriForFile(application, "${application.packageName}.files", file)
                     }
                     ready(uri)
-                } catch (failure: Exception) { error = "无法分享备份：${failure.message}" }
+                } catch (failure: Exception) { error = tr(TextKey.COULD_NOT_SHARE_BACKUP, failure.message) }
                 finally { busy = false }
             }
         }
     }
 
-    fun undoRecovery(point: RecoveryPoint, after: () -> Unit = {}) { performMutation("已撤销：${point.label}", after = after, notify = true) { it.undoRecovery(point.id) } }
+    fun undoRecovery(point: RecoveryPoint, after: () -> Unit = {}) { performMutation(tr(TextKey.UNDONE_2, point.label), after = after, notify = true) { it.undoRecovery(point.id) } }
 
     fun restoreVoided(id: String, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
         val record = snapshot.records.find { it.id == id }
-        performMutation("还原处理完成", recoveryLabel = "还原作废记录：${record?.let { warehouseLabel(it.warehouseId) + " / " + it.bom } ?: id}", notify = true) { it.restoreVoided(id, mode) }
+        performMutation(tr(TextKey.RESTORE_COMPLETE), recoveryLabel = tr(TextKey.RESTORE_VOIDED_RECORD, record?.let { warehouseLabel(it.warehouseId) + " / " + it.bom } ?: id), notify = true) { it.restoreVoided(id, mode) }
     }
 
     fun restoreBackup(candidate: InventorySnapshot) {
-        performMutation("备份已合并", recoveryLabel = "合并 JSON 备份", notify = true) { repository ->
+        performMutation(tr(TextKey.BACKUP_MERGED), recoveryLabel = tr(TextKey.MERGE_JSON_BACKUP), notify = true) { repository ->
             val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
             val count = repository.restore(candidate)
             val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
@@ -226,12 +243,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                         exportCache.outputStream().use { InventoryFiles.writeBackup(request.snapshot, it) }
                         // Persist before showing another Activity so process recreation can finish the export.
                         check(preferences.edit().putString("pending_kind", request.kind).putString("pending_task", request.taskId)
-                            .putString("pending_warehouse", request.warehouseId).commit()) { "无法保存导出请求" }
+                            .putString("pending_warehouse", request.warehouseId).putString("pending_language", request.language.tag).commit()) { tr(TextKey.COULD_NOT_SAVE_THE_EXPORT_REQUEST) }
                         request
                     }
                     pendingExport = request
                     launchPicker()
-                } catch (e: Exception) { error = "无法准备导出：${e.message}" }
+                } catch (e: Exception) { error = tr(TextKey.COULD_NOT_PREPARE_EXPORT, e.message) }
                 finally { busy = false }
             }
         }
@@ -244,29 +261,33 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             busy = true
             try {
                 val request = pendingExport ?: withContext(Dispatchers.IO) {
-                    val kind = preferences.getString("pending_kind", null) ?: error("导出请求已失效，请重新导出")
+                    val kind = preferences.getString("pending_kind", null) ?: error(tr(TextKey.THE_EXPORT_REQUEST_HAS_EXPIRED_PLEASE_EXPORT_AGAIN))
                     val cached = exportCache.inputStream().use(InventoryFiles::readBackup)
-                    PendingExport(kind, cached, preferences.getString("pending_task", null), preferences.getString("pending_warehouse", null))
+                    PendingExport(kind, cached, preferences.getString("pending_task", null), preferences.getString("pending_warehouse", null),
+                        AppLanguage.fromTag(preferences.getString("pending_language", null)) ?: AppLanguage.current)
                 }
                 withContext(Dispatchers.IO) {
                     getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.use { output ->
                         when (request.kind) {
-                            "template" -> InventoryImport.writeTemplate(output)
-                            "xlsx" -> InventoryFiles.writeXlsx(request.snapshot, output, request.taskId, request.warehouseId)
-                            "csv" -> InventoryFiles.writeCsvZip(request.snapshot, output, request.taskId, request.warehouseId)
+                            "template" -> InventoryImport.writeTemplate(output, request.language)
+                            "xlsx" -> InventoryFiles.writeXlsx(request.snapshot, output, request.taskId, request.warehouseId, request.language)
+                            "csv" -> InventoryFiles.writeCsvZip(request.snapshot, output, request.taskId, request.warehouseId, request.language)
                             else -> InventoryFiles.writeBackup(request.snapshot, output)
                         }
-                    } ?: error("无法打开保存位置，请重新选择")
+                    } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_SAVE_LOCATION_PLEASE_SELECT_ANOTHER))
                 }
                 val at = System.currentTimeMillis()
-                lastExport = "${formatTime(at)} · ${if (request.kind == "template") "标准导入模板" else if (request.kind == "backup") "完整备份" else if (request.warehouseId == null) "全部仓库" else warehouseLabel(request.warehouseId)}"
-                preferences.edit().putString("last_export", lastExport).apply()
+                lastExportAt = at
+                lastExportKind = request.kind
+                lastExportWarehouse = request.warehouseId?.let(::warehouseLabel).orEmpty()
+                preferences.edit().putString("last_export", lastExport).putLong("last_export_at", at)
+                    .putString("last_export_kind", lastExportKind).putString("last_export_label", lastExportWarehouse).apply()
                 if (request.kind == "backup") {
                     lastBackupAt = request.snapshot.records.maxOfOrNull { it.updatedAt } ?: at
                     preferences.edit().putLong("backup_at", lastBackupAt).apply()
                 }
-                message = "文件已保存，请复制到电脑或其他备份位置"
-            } catch (e: Exception) { error = "文件未保存成功：${e.message ?: "请重新选择位置"}" }
+                message = tr(TextKey.FILE_SAVED_COPY_IT_TO_A_COMPUTER_OR_ANOTHER)
+            } catch (e: Exception) { error = tr(TextKey.FILE_COULD_NOT_BE_SAVED, e.message ?: tr(TextKey.PLEASE_SELECT_ANOTHER_LOCATION)) }
             finally { clearPendingExport(); busy = false }
           }
         }
@@ -274,7 +295,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun clearPendingExport() {
         pendingExport = null
-        preferences.edit().remove("pending_kind").remove("pending_task").remove("pending_warehouse").apply()
+        preferences.edit().remove("pending_kind").remove("pending_task").remove("pending_warehouse").remove("pending_language").apply()
         exportCache.delete()
     }
 
@@ -285,9 +306,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 restoreCandidate = withContext(Dispatchers.IO) {
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use(InventoryFiles::readBackup)
-                        ?: error("无法打开备份文件")
+                        ?: error(tr(TextKey.COULD_NOT_OPEN_THE_BACKUP_FILE))
                 }
-            } catch (e: Exception) { error = "备份未读取：${e.message}" }
+            } catch (e: Exception) { error = tr(TextKey.COULD_NOT_READ_BACKUP, e.message) }
             finally { busy = false }
         }
     }
@@ -301,13 +322,13 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     val resolver = getApplication<Application>().contentResolver
                     val name = runCatching { resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                         if (cursor.moveToFirst()) cursor.getString(0) else null
-                    } }.getOrNull()?.filterNot(Char::isISOControl)?.take(200)?.ifBlank { null } ?: uri.lastPathSegment?.take(200) ?: "CSV 文件"
-                    val rows = resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error("无法打开导入文件")
+                    } }.getOrNull()?.filterNot(Char::isISOControl)?.take(200)?.ifBlank { null } ?: uri.lastPathSegment?.take(200) ?: tr(TextKey.CSV_FILE)
+                    val rows = resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
                     Triple(rows, name, InventoryImport.fingerprint(rows))
                 }
                 importRows = loaded.first; importFileName = loaded.second; importFingerprint = loaded.third
-                message = "已读取 ${loaded.first.size} 条，请选择目标仓库并确认导入"
-            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; error = "导入文件未读取：${e.message}" }
+                message = tr(TextKey.READ_ROWS_CHOOSE_A_TARGET_WAREHOUSE_AND_CONFIRM_IMPORT, loaded.first.size)
+            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; error = tr(TextKey.COULD_NOT_READ_IMPORT_FILE, e.message) }
             finally { busy = false }
         }
     }
@@ -315,7 +336,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun importDuplicateNotice(): String {
         val seen = snapshot.records.filter { !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
         val duplicates = importRows.orEmpty().filter { it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() && !seen.add(it.sn) }
-        return if (duplicates.isEmpty()) "" else "以下 ${duplicates.size} 台重复整机导入后进入作废区：\n" +
+        return if (duplicates.isEmpty()) "" else tr(TextKey.THESE_DUPLICATE_MACHINES_WILL_BE_IMPORTED_AS_VOIDED_RECORDS, duplicates.size) +
             duplicates.groupingBy { "BOM ${it.bom} / SN ${it.sn}" }.eachCount().entries.joinToString("\n") { "${it.key} ×${it.value}" }
     }
 
@@ -323,22 +344,22 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         val matches = importReceipts.filter { it.fingerprint == importFingerprint }
         if (matches.isEmpty()) return ""
         val sameTarget = matches.count { it.warehouseId == warehouse }
-        return "相同内容的文件曾导入 ${matches.size} 次，其中本仓 $sameTarget 次。再次导入会再次增加数量。\n" +
-            matches.take(5).joinToString("\n") { "${formatHistoryTime(it.at)} · ${it.warehouseLabel} · ${it.rows} 行（${it.fileName}）" }
+        return tr(TextKey.THE_SAME_FILE_CONTENT_WAS_IMPORTED_TIMES_INCLUDING_TIMES, matches.size, sameTarget) +
+            matches.take(5).joinToString("\n") { tr(TextKey.ROWS, formatHistoryTime(it.at), it.warehouseLabel, it.rows, it.fileName) }
     }
 
     fun importPreview(warehouse: String, mode: DuplicateMode) = ImportPreview.calculate(snapshot, importRows.orEmpty(), warehouse, mode)
 
     fun applyImport(warehouse: String, mode: DuplicateMode, allowRepeat: Boolean = false) {
         val rows = importRows ?: return
-        if (rows.isEmpty()) { error = "文件只有表头，没有可导入数据"; return }
+        if (rows.isEmpty()) { error = tr(TextKey.THE_FILE_CONTAINS_ONLY_A_HEADER_WITH_NO_DATA); return }
         val issue = importPreview(warehouse, mode).issue
         if (issue != null) { error = issue; return }
-        if (!allowRepeat && repeatImportNotice(warehouse).isNotEmpty()) { error = "此文件内容已导入，请先预览，再确认是否仍要重复导入"; return }
+        if (!allowRepeat && repeatImportNotice(warehouse).isNotEmpty()) { error = tr(TextKey.THIS_FILE_CONTENT_WAS_IMPORTED_BEFORE_PREVIEW_IT_AND); return }
         val task = storageTaskId
-        val metadata = ImportMetadata(importFingerprint.ifEmpty { InventoryImport.fingerprint(rows) }, importFileName.ifEmpty { "CSV 文件" })
-        performMutation("导入完成", after = { importRows = null; importFileName = ""; importFingerprint = "" },
-            recoveryLabel = "导入 ${metadata.fileName} → ${warehouseLabel(warehouse)}".take(512), notify = true) { repository ->
+        val metadata = ImportMetadata(importFingerprint.ifEmpty { InventoryImport.fingerprint(rows) }, importFileName.ifEmpty { tr(TextKey.CSV_FILE) })
+        performMutation(tr(TextKey.IMPORT_COMPLETE), after = { importRows = null; importFileName = ""; importFingerprint = "" },
+            recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true) { repository ->
             repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
                 sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual") }, mode, metadata)
         }
@@ -348,12 +369,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         val existingIds = snapshot.records.mapTo(mutableSetOf()) { it.id }
         val seen = snapshot.records.filter { !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
         val duplicates = candidate.records.filter { it.id !in existingIds && !it.voided && it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() && !seen.add(it.sn) }
-        return if (duplicates.isEmpty()) "" else "以下 ${duplicates.size} 台新增重复整机将进入作废区：\n" +
+        return if (duplicates.isEmpty()) "" else tr(TextKey.THESE_NEW_MACHINES_HAVE_DUPLICATE_SNS_AND_WILL_BE, duplicates.size) +
             duplicates.groupingBy { "BOM ${it.bom} / SN ${it.sn}" }.eachCount().entries.joinToString("\n") { "${it.key} ×${it.value}" }
     }
 
     fun warehouseLabel(id: String): String {
-        val warehouse = snapshot.warehouses.find { it.id == id } ?: return "未选择仓库"
+        val warehouse = snapshot.warehouses.find { it.id == id } ?: return tr(TextKey.NO_WAREHOUSE_SELECTED)
         return "${snapshot.countries.find { it.id == warehouse.countryId }?.name.orEmpty()} / ${warehouse.name}"
     }
 

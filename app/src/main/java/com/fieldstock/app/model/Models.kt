@@ -1,5 +1,7 @@
 package com.fieldstock.app.model
 
+import com.fieldstock.app.i18n.*
+
 data class InventoryTask(val id: String, val name: String, val createdAt: Long)
 data class Country(val id: String, val name: String)
 data class Warehouse(val id: String, val countryId: String, val name: String)
@@ -34,13 +36,13 @@ object IdentifierRules {
     private val bom = Regex("[A-Za-z0-9]{1,14}")
     private val sn = Regex("[A-Za-z0-9]+-[A-Za-z0-9]+")
     fun validateBom(value: String): String? = when {
-        value.isEmpty() -> "请填写 BOM"
-        !bom.matches(value) -> "BOM 只允许字母和数字，最多 14 位"
+        value.isEmpty() -> tr(TextKey.ENTER_A_BOM)
+        !bom.matches(value) -> tr(TextKey.BOM_MUST_CONTAIN_ONLY_LETTERS_AND_DIGITS_UP_TO)
         else -> null
     }
     fun validateSn(value: String): String? = when {
-        value.isEmpty() -> "请填写 SN"
-        value.length > 15 || !sn.matches(value) -> "SN 需为两段字母或数字，用一个 - 分隔；不计 - 最多 14 位"
+        value.isEmpty() -> tr(TextKey.ENTER_AN_SN)
+        value.length > 15 || !sn.matches(value) -> tr(TextKey.SN_MUST_CONTAIN_TWO_GROUPS_OF_LETTERS_OR_DIGITS)
         else -> null
     }
 }

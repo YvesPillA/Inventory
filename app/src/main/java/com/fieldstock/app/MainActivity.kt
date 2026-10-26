@@ -3,7 +3,6 @@ package com.fieldstock.app
 import android.content.Intent
 import android.content.ClipData
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -32,12 +31,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.ViewModelProvider
 import com.fieldstock.app.model.*
 import com.fieldstock.app.scan.ScanActivity
+import com.fieldstock.app.i18n.*
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
@@ -49,19 +50,26 @@ internal val Mist = Color(0xFFF4F7FA)
 internal val Ink = Color(0xFF193543)
 internal val Amber = Color(0xFF995010)
 
-class MainActivity : ComponentActivity() {
+class MainActivity : LocalizedActivity() {
     override fun onStart() {
         super.onStart()
-        ViewModelProvider(this)[InventoryViewModel::class.java].checkDailyBackup()
+        if (LanguageSettings.selected(this) != null) ViewModelProvider(this)[InventoryViewModel::class.java].checkDailyBackup()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+        enableEdgeToEdge(statusBarStyle = if (LanguageSettings.selected(this) == null)
+            SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+            else SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Blue, secondary = Teal, surface = Color.White,
                 background = Mist, onSurface = Ink, onBackground = Ink, surfaceVariant = Color(0xFFE5EDF3),
                 secondaryContainer = Color(0xFFDDEEEB), onSecondaryContainer = Petrol,
-                primaryContainer = Color(0xFFE5EFFC), onPrimaryContainer = Petrol)) { FieldStockApp() }
+                primaryContainer = Color(0xFFE5EFFC), onPrimaryContainer = Petrol)) {
+                if (LanguageSettings.selected(this) == null) FirstLanguageChooser { language ->
+                    LanguageSettings.select(this, language)
+                    recreate()
+                } else FieldStockApp()
+            }
         }
     }
 }
@@ -78,7 +86,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     var snFirst by rememberSaveable { mutableStateOf("") }
     var snLast by rememberSaveable { mutableStateOf("") }
     var quantity by rememberSaveable { mutableStateOf("") }
-    var condition by rememberSaveable { mutableStateOf("正常") }
+    var condition by rememberSaveable { mutableStateOf(StockCondition.NORMAL) }
     var note by rememberSaveable { mutableStateOf("") }
     var sourceBom by rememberSaveable { mutableStateOf("manual") }
     var sourceSn by rememberSaveable { mutableStateOf("manual") }
@@ -106,7 +114,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     fun clearForm(keep: Boolean = false) {
         if (!keep) { bom = ""; sourceBom = "manual"; rawBom = "" }
         snFirst = ""; snLast = ""; quantity = ""; note = ""; sourceSn = "manual"; rawSn = ""
-        attempted = false; editingId = null; condition = "正常"
+        attempted = false; editingId = null; condition = StockCondition.NORMAL
     }
     fun editRecord(record: StockRecord) {
         kind = record.kind.name; bom = record.bom
@@ -121,8 +129,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         val updateId = editingId
         vm.duplicateOnRestore = false
         val after = { clearForm(keepBom && input.kind == ItemKind.MACHINE && updateId == null) }
-        if (updateId == null) vm.performMutation("已保存", after = after, notify = true) { it.saveIncoming(input, mode) }
-        else vm.perform("已保存修改", after = after, notify = true) { it.save(input, updateId) }
+        if (updateId == null) vm.performMutation(tr(TextKey.SAVED), after = after, notify = true) { it.saveIncoming(input, mode) }
+        else vm.perform(tr(TextKey.CHANGES_SAVED), after = after, notify = true) { it.save(input, updateId) }
     }
     fun chooseWarehouse(id: String) {
         if (id != vm.warehouseId && dirty) switchWarehouse = id
@@ -147,26 +155,26 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     val importFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewImport)
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewRestore)
     fun restoreBackup() {
-        if (dirty) vm.error = "还有未保存输入，请先保存或清空后再恢复备份"
+        if (dirty) vm.error = tr(TextKey.THERE_IS_UNSAVED_INPUT_SAVE_OR_CLEAR_IT_BEFORE)
         else { vm.duplicateOnRestore = false; restore.launch(arrayOf("application/json", "application/octet-stream", "text/plain")) }
     }
     val backupActions = BackupActions(
         save = { entry ->
             vm.prepareExport("backup", false, automaticId = entry.id) {
-                createBackup.launch("盘库完整备份-${entry.day}-${entry.at}.json")
+                createBackup.launch(tr(TextKey.FIELDSTOCK_FULL_BACKUP_JSON, entry.day, entry.at))
             }
         },
         share = { entry -> vm.shareAutomaticBackup(entry.id) { uri ->
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "application/json"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newRawUri("盘库完整备份", uri)
+                clipData = ClipData.newRawUri(tr(TextKey.FIELDSTOCK_FULL_BACKUP), uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            context.startActivity(Intent.createChooser(send, "分享完整备份"))
+            context.startActivity(Intent.createChooser(send, tr(TextKey.SHARE_FULL_BACKUP)))
         } },
         restore = { entry ->
-            if (dirty) vm.error = "还有未保存输入，请先保存或清空后再恢复备份"
+            if (dirty) vm.error = tr(TextKey.THERE_IS_UNSAVED_INPUT_SAVE_OR_CLEAR_IT_BEFORE)
             else { vm.duplicateOnRestore = false; vm.previewAutomaticBackup(entry.id) }
         },
     )
@@ -177,7 +185,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     } else Scaffold(containerColor = Mist, topBar = { WarehouseHeader(vm.warehouseLabel(vm.warehouseId)) }, bottomBar = {
         if (!keyboardVisible) NavigationBar(containerColor = Color.White) {
             val icons = listOf(Icons.Default.Edit, Icons.Default.List, Icons.Default.Share, Icons.Default.Settings)
-            listOf("盘点", "记录", "处理", "设置").forEachIndexed { index, title ->
+            listOf(tr(TextKey.COUNT), tr(TextKey.RECORDS_3), tr(TextKey.FILES), tr(TextKey.SETTINGS)).forEachIndexed { index, title ->
                 NavigationBarItem(selected = page == index, onClick = { focus.clearFocus(); page = index },
                     icon = { Icon(icons[index], contentDescription = title) }, label = { Text(title) }, enabled = !vm.busy)
             }
@@ -190,40 +198,40 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     Box(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)) {
                       Column(Modifier.fillMaxWidth().align(Alignment.TopCenter), verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
                         if (!keyboardVisible) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.weight(1f)) { ChoiceRow(listOf("PART" to "配件", "MACHINE" to "整机"), kind, !vm.busy && editingId == null) {
+                            Box(Modifier.weight(1f)) { ChoiceRow(listOf("PART" to tr(TextKey.PARTS), "MACHINE" to tr(TextKey.MACHINE)), kind, !vm.busy && editingId == null) {
                                 kind = it; attempted = false
                             } }
-                            TextButton(onClick = { focus.clearFocus(); moreOpen = true }, enabled = !vm.busy) { Text("更多") }
+                            TextButton(onClick = { focus.clearFocus(); moreOpen = true }, enabled = !vm.busy) { Text(tr(TextKey.MORE)) }
                         }
-                        else Text(if (editingId != null) "修改${if (kind == "PART") "配件" else "整机"}" else if (kind == "PART") "配件" else "整机", fontSize = 13.sp, color = Petrol)
+                        else Text(if (editingId != null) tr(TextKey.EDIT_2, if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE)) else if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE), fontSize = 13.sp, color = Petrol)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             CodeField("BOM", bom, { bom = it; sourceBom = "manual"; rawBom = "" }, Modifier.weight(1f), !vm.busy,
-                                attempted && !(condition == "待核查" && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null)
+                                attempted && !(condition == StockCondition.PENDING && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null)
                             ScanButton("BOM", !vm.busy) { scan("BOM") }
                         }
                         if (kind == "MACHINE") {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                CodeField("SN 前段", snFirst, { snFirst = it; sourceSn = "manual"; rawSn = "" }, Modifier.weight(1f), !vm.busy)
+                                CodeField(tr(TextKey.SN_FIRST_PART), snFirst, { snFirst = it; sourceSn = "manual"; rawSn = "" }, Modifier.weight(1f), !vm.busy)
                                 Text("-", color = Petrol, fontSize = 20.sp)
-                                CodeField("SN 后段", snLast, { snLast = it; sourceSn = "manual"; rawSn = "" }, Modifier.weight(1f), !vm.busy)
+                                CodeField(tr(TextKey.SN_LAST_PART), snLast, { snLast = it; sourceSn = "manual"; rawSn = "" }, Modifier.weight(1f), !vm.busy)
                                 ScanButton("SN", !vm.busy) { scan("SN") }
                             }
                             if (!compact) Row(Modifier.fillMaxWidth().height(36.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text("连续录入时保留 BOM", Modifier.weight(1f), fontSize = 14.sp)
+                                Text(tr(TextKey.KEEP_BOM_FOR_THE_NEXT_MACHINE), Modifier.weight(1f), fontSize = 14.sp)
                                 Switch(keepBom, { keepBom = it }, enabled = !vm.busy && editingId == null)
                             }
-                        } else OutlinedTextField(quantity, { quantity = it }, label = { Text("数量（件）") }, singleLine = true,
+                        } else OutlinedTextField(quantity, { quantity = it }, label = { Text(tr(TextKey.QUANTITY_PCS)) }, singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                             enabled = !vm.busy, isError = attempted && quantity.toIntOrNull()?.let { it in 1..1_000_000_000 } != true,
                             modifier = Modifier.fillMaxWidth())
-                        if (!compact) Text("${if (editingId == null) condition else "修改记录 · $condition"}${if (note.isNotEmpty()) " · 有备注" else ""}",
-                            color = if (condition == "正常") Teal else Amber, fontSize = 12.sp)
+                        if (!compact) Text("${if (editingId == null) conditionLabel(condition) else tr(TextKey.EDITING_RECORD, conditionLabel(condition))}${if (note.isNotEmpty()) tr(TextKey.HAS_NOTES) else ""}",
+                            color = if (condition == StockCondition.NORMAL) Teal else Amber, fontSize = 12.sp)
                       }
                       Column(Modifier.fillMaxWidth().align(Alignment.BottomCenter), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val formError = if (!attempted) null else when {
-                            !(condition == "待核查" && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null -> IdentifierRules.validateBom(bom.trim())
-                            kind == "MACHINE" && !(condition == "待核查" && sn.isBlank()) -> IdentifierRules.validateSn(sn.trim())
-                            kind == "PART" && quantity.toIntOrNull()?.let { it in 1..1_000_000_000 } != true -> "数量须为正整数"
+                            !(condition == StockCondition.PENDING && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null -> IdentifierRules.validateBom(bom.trim())
+                            kind == "MACHINE" && !(condition == StockCondition.PENDING && sn.isBlank()) -> IdentifierRules.validateSn(sn.trim())
+                            kind == "PART" && quantity.toIntOrNull()?.let { it in 1..1_000_000_000 } != true -> tr(TextKey.QUANTITY_MUST_BE_A_POSITIVE_INTEGER)
                             else -> null
                         }
                         Text(formError ?: vm.message.orEmpty(), color = if (formError == null) Teal else MaterialTheme.colorScheme.error,
@@ -232,10 +240,10 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                             Button(onClick = {
                                 attempted = true
                                 val count = if (kind == "MACHINE") 1 else quantity.toIntOrNull()
-                                val pending = condition == "待核查"
+                                val pending = condition == StockCondition.PENDING
                                 val bomValid = (pending && bom.isBlank()) || IdentifierRules.validateBom(bom.trim()) == null
                                 val snValid = kind != "MACHINE" || (pending && sn.isBlank()) || IdentifierRules.validateSn(sn.trim()) == null
-                                if (pending && bom.isBlank() && sn.isBlank() && note.isBlank()) vm.error = "待核查记录至少填写一个编号或备注"
+                                if (pending && bom.isBlank() && sn.isBlank() && note.isBlank()) vm.error = tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
                                 else if (bomValid && snValid && count != null && count in 1..1_000_000_000) {
                                     focus.clearFocus()
                                     val previous = vm.snapshot.records.find { it.id == editingId }
@@ -246,29 +254,29 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                                     val parts = active.filter { input.bom.isNotEmpty() && it.kind == ItemKind.PART && it.warehouseId == vm.warehouseId && it.bom == input.bom && it.condition == input.condition }
                                     val closeSn = active.find { it.kind == ItemKind.MACHINE && it.sn != input.sn && it.sn.equals(input.sn, true) }
                                     if (editingId == null && kind == "PART" && parts.isNotEmpty()) {
-                                        saveWarning = "${vm.warehouseLabel(vm.warehouseId)}\nBOM：${input.bom} · ${input.condition}\n已有 ${parts.sumOf { it.quantity.toLong() }} 件，本次 ${input.quantity} 件。请选择相加到已有记录，或单独新增条目。"
+                                        saveWarning = tr(TextKey.BOM_EXISTING_PCS_THIS_ENTRY_PCS_ADD_TO_THE, vm.warehouseLabel(vm.warehouseId), input.bom, conditionLabel(input.condition), parts.sumOf { it.quantity.toLong() }, input.quantity)
                                         pendingParts = true; pendingDuplicateSave = false
                                         pendingSave = input
                                     } else if (editingId == null && kind == "MACHINE" && active.any { it.kind == ItemKind.MACHINE && it.sn == input.sn && input.sn.isNotEmpty() }) {
-                                        saveWarning = "SN：${input.sn}\n这个 SN 已有正常记录。确认后，本次新录入的整机将转入作废页，已有正常记录保持。"
+                                        saveWarning = tr(TextKey.SN_AN_ACTIVE_RECORD_ALREADY_USES_THIS_SN_IF, input.sn)
                                         pendingParts = false; pendingDuplicateSave = true; pendingSave = input
                                     } else if (kind == "MACHINE" && closeSn != null) {
-                                        saveWarning = "已有 ${closeSn.sn} 与本次 ${input.sn} 仅大小写不同，请核对是否为不同编号。"
+                                        saveWarning = tr(TextKey.EXISTING_SN_AND_NEW_SN_DIFFER_ONLY_IN_LETTER, closeSn.sn, input.sn)
                                         pendingParts = false; pendingDuplicateSave = false
                                         pendingSave = input
                                     } else submit(input)
                                 }
-                            }, enabled = !vm.busy, modifier = Modifier.weight(1f).height(48.dp)) { Text(if (editingId == null) "保存这一条" else "保存修改", fontSize = 17.sp) }
-                            TextButton(onClick = { focus.clearFocus(); confirmClearInput = true }, enabled = dirty && !vm.busy) { Text(if (editingId == null) "清空" else "取消") }
+                            }, enabled = !vm.busy, modifier = Modifier.weight(1f).height(48.dp)) { Text(if (editingId == null) tr(TextKey.SAVE_RECORD) else tr(TextKey.SAVE_CHANGES), fontSize = 17.sp) }
+                            TextButton(onClick = { focus.clearFocus(); confirmClearInput = true }, enabled = dirty && !vm.busy) { Text(if (editingId == null) tr(TextKey.CLEAR) else tr(TextKey.CANCEL)) }
                         }
                         if (!compact) {
                             val active = vm.snapshot.records.filter { !it.voided && it.warehouseId == vm.warehouseId }
-                            Text("配件 ${active.filter { it.kind == ItemKind.PART && it.condition != "待核查" }.sumOf { it.quantity.toLong() }} 件    整机 ${active.count { it.kind == ItemKind.MACHINE && it.condition != "待核查" }} 台    待核查 ${active.count { it.condition == "待核查" }} 条", fontSize = 12.sp, color = Petrol, maxLines = 1)
+                            Text(tr(TextKey.PARTS_PCS_MACHINES_PENDING, active.filter { it.kind == ItemKind.PART && it.condition != StockCondition.PENDING }.sumOf { it.quantity.toLong() }, active.count { it.kind == ItemKind.MACHINE && it.condition != StockCondition.PENDING }, active.count { it.condition == StockCondition.PENDING }), fontSize = 12.sp, color = Petrol, maxLines = 1)
                         }
                       }
                     }
                 }
-                1 -> RecordsPage(vm, onEdit = { if (dirty) vm.error = "还有未保存输入，请先保存或清空" else editRecord(it) },
+                1 -> RecordsPage(vm, onEdit = { if (dirty) vm.error = tr(TextKey.THERE_IS_UNSAVED_INPUT_SAVE_OR_CLEAR_IT_FIRST) else editRecord(it) },
                     onVoid = { confirmVoid = it }, onRestore = { record ->
                         if (record.kind == ItemKind.PART && record.bom.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.PART && it.warehouseId == record.warehouseId && it.bom == record.bom && it.condition == record.condition }) pendingRestore = record
                         else if (record.kind == ItemKind.MACHINE && record.sn.isNotEmpty() && vm.snapshot.records.any { !it.voided && it.kind == ItemKind.MACHINE && it.sn == record.sn }) pendingRestore = record
@@ -278,75 +286,77 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                 2 -> ProcessingPage(vm, onExport = { type ->
                     val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
                     vm.prepareExport(type, type != "backup") {
-                        when (type) { "xlsx" -> createXlsx.launch("盘库_${stamp}.xlsx"); "csv" -> createCsv.launch("盘库CSV_${stamp}.zip"); else -> createBackup.launch("盘库完整备份_${stamp}.json") }
+                        when (type) { "xlsx" -> createXlsx.launch(tr(TextKey.FIELDSTOCK_XLSX, stamp)); "csv" -> createCsv.launch(tr(TextKey.FIELDSTOCK_CSV_ZIP, stamp)); else -> createBackup.launch(tr(TextKey.FIELDSTOCK_FULL_BACKUP_JSON_2, stamp)) }
                     }
                 }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("text/csv", "text/comma-separated-values", "application/vnd.ms-excel", "text/plain")) },
-                    onTemplate = { vm.prepareExport("template", false) { createTemplate.launch("盘库导入模板.csv") } }, backups = backupActions)
+                    onTemplate = { vm.prepareExport("template", false) { createTemplate.launch(tr(TextKey.FIELDSTOCK_IMPORT_TEMPLATE_CSV)) } }, backups = backupActions)
                 else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions)
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
         }
     }
-    if (moreOpen) AlertDialog(onDismissRequest = { moreOpen = false }, title = { Text("状态和备注") }, text = {
+    if (moreOpen) AlertDialog(onDismissRequest = { moreOpen = false }, title = { Text(tr(TextKey.CONDITION_AND_NOTES)) }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            ChoiceRow(listOf("正常" to "正常", "损坏" to "损坏", "待核查" to "待核查"), condition, !vm.busy) { condition = it }
-            if (condition == "待核查") Text("缺失编号可留空，至少填写一个编号或备注。待核查不计入正式数量。", fontSize = 13.sp)
-            OutlinedTextField(note, { note = it }, label = { Text("备注（选填）") }, maxLines = 3)
+            ChoiceRow(listOf(StockCondition.NORMAL, StockCondition.DAMAGED, StockCondition.PENDING).map {
+                it to if (it == StockCondition.PENDING) tr(TextKey.PENDING_FILTER) else conditionLabel(it)
+            }, condition, !vm.busy) { condition = it }
+            if (condition == StockCondition.PENDING) Text(tr(TextKey.MISSING_IDENTIFIERS_MAY_BE_LEFT_BLANK_ENTER_AT_LEAST), fontSize = 13.sp)
+            OutlinedTextField(note, { note = it }, label = { Text(tr(TextKey.NOTES_OPTIONAL)) }, maxLines = 3)
         }
-    }, confirmButton = { TextButton(onClick = { focus.clearFocus(); moreOpen = false }) { Text("完成") } })
-    switchWarehouse?.let { next -> ConfirmDialog("切换仓库？", "还有未保存输入，切换会清空这些输入。", "放弃输入并切换", { switchWarehouse = null }) {
+    }, confirmButton = { TextButton(onClick = { focus.clearFocus(); moreOpen = false }) { Text(tr(TextKey.DONE)) } })
+    switchWarehouse?.let { next -> ConfirmDialog(tr(TextKey.SWITCH_WAREHOUSE), tr(TextKey.SWITCHING_WILL_CLEAR_THE_UNSAVED_INPUT), tr(TextKey.DISCARD_INPUT_AND_SWITCH), { switchWarehouse = null }) {
         clearForm(); keepBom = false; vm.select(next); entered = true; page = 0; switchWarehouse = null
     } }
-    if (confirmClearInput) ConfirmDialog("清空未保存输入？", "已保存的记录不受影响。", "清空输入", { confirmClearInput = false }) { clearForm(); keepBom = false; confirmClearInput = false }
+    if (confirmClearInput) ConfirmDialog(tr(TextKey.CLEAR_UNSAVED_INPUT), tr(TextKey.SAVED_RECORDS_ARE_UNAFFECTED), tr(TextKey.CLEAR_INPUT), { confirmClearInput = false }) { clearForm(); keepBom = false; confirmClearInput = false }
     pendingSave?.let { input ->
-        if (pendingParts) DuplicateModeDialog("相同配件如何入库？", saveWarning, { pendingSave = null }) { mode -> pendingSave = null; submit(input, mode) }
-        else ConfirmDialog(if (pendingDuplicateSave) "发现重复 SN" else "核对后保存", saveWarning,
-            if (pendingDuplicateSave) "确认转入作废" else "确认保存", { pendingSave = null }) { pendingSave = null; submit(input) }
+        if (pendingParts) DuplicateModeDialog(tr(TextKey.HOW_SHOULD_MATCHING_PARTS_BE_SAVED), saveWarning, { pendingSave = null }) { mode -> pendingSave = null; submit(input, mode) }
+        else ConfirmDialog(if (pendingDuplicateSave) tr(TextKey.DUPLICATE_SN_FOUND) else tr(TextKey.REVIEW_BEFORE_SAVING), saveWarning,
+            if (pendingDuplicateSave) tr(TextKey.CONFIRM_SAVE_AS_VOIDED) else tr(TextKey.CONFIRM_SAVE), { pendingSave = null }) { pendingSave = null; submit(input) }
     }
     pendingRestore?.let { record ->
-        if (record.kind == ItemKind.PART) DuplicateModeDialog("相同配件如何还原？", "${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom} · ${record.condition}\n还原数量：${record.quantity} 件。", { pendingRestore = null }) { mode ->
+        if (record.kind == ItemKind.PART) DuplicateModeDialog(tr(TextKey.HOW_SHOULD_MATCHING_PARTS_BE_RESTORED), tr(TextKey.BOM_QUANTITY_TO_RESTORE_PCS, vm.warehouseLabel(record.warehouseId), record.bom, conditionLabel(record.condition), record.quantity), { pendingRestore = null }) { mode ->
             pendingRestore = null; vm.restoreVoided(record.id, mode)
-        } else ConfirmDialog("SN 已存在，保持作废", "SN：${record.sn}\n已有正常整机占用这个 SN，本条记录将保留在作废页。", "确认保留作废", { pendingRestore = null }) {
+        } else ConfirmDialog(tr(TextKey.SN_ALREADY_EXISTS_KEEP_VOIDED), tr(TextKey.SN_AN_ACTIVE_MACHINE_ALREADY_USES_THIS_SN_THIS, record.sn), tr(TextKey.CONFIRM_KEEP_VOIDED), { pendingRestore = null }) {
             pendingRestore = null; vm.restoreVoided(record.id)
         }
     }
-    confirmVoid?.let { record -> ConfirmDialog("作废这条记录？", "${record.bom}\n${record.sn}\n作废后不再计数，可以在作废页还原。", "确认作废", { confirmVoid = null }) {
-        confirmVoid = null; vm.perform("记录已作废") { it.voidRecord(record.id) }
+    confirmVoid?.let { record -> ConfirmDialog(tr(TextKey.VOID_THIS_RECORD), tr(TextKey.VOIDED_RECORDS_ARE_EXCLUDED_FROM_TOTALS_AND_CAN_BE_2, record.bom, record.sn), tr(TextKey.CONFIRM_VOID), { confirmVoid = null }) {
+        confirmVoid = null; vm.perform(tr(TextKey.RECORD_VOIDED)) { it.voidRecord(record.id) }
     } }
-    confirmDelete?.let { record -> ConfirmDialog("删除这条作废记录？", "${record.bom}\n${record.sn}\n删除后不在作废页保留，可在设置的最近恢复点撤销。", "确认删除", { confirmDelete = null }) {
-        confirmDelete = null; vm.perform("作废记录已删除", recoveryLabel = "删除作废记录：${vm.warehouseLabel(record.warehouseId)} / ${record.bom}") { it.deleteVoided(record.id) }
+    confirmDelete?.let { record -> ConfirmDialog(tr(TextKey.DELETE_THIS_VOIDED_RECORD), tr(TextKey.THE_RECORD_WILL_BE_REMOVED_FROM_THE_VOIDED_TAB, record.bom, record.sn), tr(TextKey.CONFIRM_DELETE), { confirmDelete = null }) {
+        confirmDelete = null; vm.perform(tr(TextKey.VOIDED_RECORD_DELETED), recoveryLabel = tr(TextKey.DELETE_VOIDED_RECORD, vm.warehouseLabel(record.warehouseId), record.bom)) { it.deleteVoided(record.id) }
     } }
     clearRecords?.let { category ->
         val isVoid = category == "voided"
         val count = vm.snapshot.records.count { it.warehouseId == vm.warehouseId && it.voided == isVoid }
         val second = !isVoid && activeClearStep == 1
-        ConfirmDialog(if (isVoid) "清除本仓作废记录？" else if (second) "再次确认清空正常记录" else "清空本仓正常记录？",
-            "${vm.warehouseLabel(vm.warehouseId)}\n共 $count 条${if (isVoid) "作废" else "非作废"}记录，将从本仓记录删除，不受搜索和筛选影响。操作前自动保留本机恢复点。${if (!isVoid) "\n作废记录和其他仓库不受影响。" else "\n正常记录和其他仓库不受影响。"}",
-            if (isVoid) "确认清除" else if (second) "确认清空正常" else "继续清空", { clearRecords = null; activeClearStep = 0 }) {
+        ConfirmDialog(if (isVoid) tr(TextKey.CLEAR_THIS_WAREHOUSE_S_VOIDED_RECORDS) else if (second) tr(TextKey.CONFIRM_CLEARING_ACTIVE_RECORDS_AGAIN) else tr(TextKey.CLEAR_THIS_WAREHOUSE_S_ACTIVE_RECORDS),
+            tr(TextKey.DELETE_ALL_RECORDS_FROM_THIS_WAREHOUSE_REGARDLESS_OF_SEARCH, vm.warehouseLabel(vm.warehouseId), count, if (isVoid) tr(TextKey.VOIDED) else tr(TextKey.ACTIVE_2), if (!isVoid) tr(TextKey.VOIDED_RECORDS_AND_OTHER_WAREHOUSES_ARE_UNAFFECTED) else tr(TextKey.ACTIVE_RECORDS_AND_OTHER_WAREHOUSES_ARE_UNAFFECTED)),
+            if (isVoid) tr(TextKey.CONFIRM_CLEAR) else if (second) tr(TextKey.CONFIRM_CLEAR_ACTIVE) else tr(TextKey.CONTINUE_CLEARING), { clearRecords = null; activeClearStep = 0 }) {
             if (!isVoid && !second) activeClearStep = 1
             else {
                 val warehouse = vm.warehouseId; clearRecords = null; activeClearStep = 0
-                if (isVoid) vm.perform("本仓作废记录已清除", recoveryLabel = "清除作废：${vm.warehouseLabel(warehouse)}") { it.clearVoided(warehouse) }
-                else vm.perform("本仓正常记录已清空", recoveryLabel = "清空正常：${vm.warehouseLabel(warehouse)}") { it.clearActive(warehouse) }
+                if (isVoid) vm.perform(tr(TextKey.THIS_WAREHOUSE_S_VOIDED_RECORDS_CLEARED), recoveryLabel = tr(TextKey.CLEAR_VOIDED, vm.warehouseLabel(warehouse))) { it.clearVoided(warehouse) }
+                else vm.perform(tr(TextKey.THIS_WAREHOUSE_S_ACTIVE_RECORDS_CLEARED), recoveryLabel = tr(TextKey.CLEAR_ACTIVE, vm.warehouseLabel(warehouse))) { it.clearActive(warehouse) }
             }
         }
     }
-    vm.duplicate?.let { record -> AlertDialog(onDismissRequest = { vm.duplicate = null }, title = { Text(if (vm.duplicateOnRestore) "SN 已存在，未还原" else "SN 已经录入") },
-        text = { Text("${record.sn}\n${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom}\n${if (vm.duplicateOnRestore) "SN 必须唯一，这条记录仍保留在作废页。" else "本次没有新增记录，请核查是否重复盘点。"}") },
-        confirmButton = { TextButton(onClick = { vm.duplicate = null }) { Text(if (vm.duplicateOnRestore) "保留作废" else "返回核对") } }) }
-    if (vm.duplicateSummary.isNotEmpty()) AlertDialog(onDismissRequest = { vm.duplicateSummary = emptyList() }, title = { Text("重复 SN 已保留在作废页") },
+    vm.duplicate?.let { record -> AlertDialog(onDismissRequest = { vm.duplicate = null }, title = { Text(if (vm.duplicateOnRestore) tr(TextKey.SN_ALREADY_EXISTS_NOT_RESTORED) else tr(TextKey.SN_ALREADY_RECORDED)) },
+        text = { Text("${record.sn}\n${vm.warehouseLabel(record.warehouseId)}\nBOM：${record.bom}\n${if (vm.duplicateOnRestore) tr(TextKey.SNS_MUST_BE_UNIQUE_THIS_RECORD_REMAINS_VOIDED) else tr(TextKey.NO_NEW_RECORD_WAS_ADDED_CHECK_FOR_A_DUPLICATE)}") },
+        confirmButton = { TextButton(onClick = { vm.duplicate = null }) { Text(if (vm.duplicateOnRestore) tr(TextKey.KEEP_VOIDED) else tr(TextKey.BACK_TO_REVIEW)) } }) }
+    if (vm.duplicateSummary.isNotEmpty()) AlertDialog(onDismissRequest = { vm.duplicateSummary = emptyList() }, title = { Text(tr(TextKey.DUPLICATE_SNS_SAVED_AS_VOIDED)) },
         text = { Column(Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
-            Text("本次共 ${vm.duplicateSummary.size} 条重复整机记录，已统一保留在作废页。已有正常记录保持。")
+            Text(tr(TextKey.SAVED_DUPLICATE_MACHINE_RECORDS_ON_THE_VOIDED_TAB_EXISTING, vm.duplicateSummary.size))
             vm.duplicateSummary.forEach { Text("BOM：${it.bom}\nSN：${it.sn}\n${vm.warehouseLabel(it.warehouseId)}", modifier = Modifier.padding(top = 8.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
-        } }, confirmButton = { TextButton(onClick = { vm.duplicateSummary = emptyList() }) { Text("知道了") } })
-    vm.error?.let { message -> AlertDialog(onDismissRequest = { vm.error = null }, title = { Text("操作未完成") }, text = { Text(message) }, confirmButton = { TextButton(onClick = { vm.error = null }) { Text("知道了") } }) }
-    vm.restoreCandidate?.let { candidate -> ConfirmDialog("合并这个备份？", "包含 ${candidate.warehouses.size} 个仓库、${candidate.records.size} 条记录。相同记录不重复增加，同 ID 内容冲突时整次取消。新增重复 SN 的整机保留在作废页。\n${vm.restoreDuplicateNotice(candidate)}", "检查并合并", { vm.restoreCandidate = null }) {
+        } }, confirmButton = { TextButton(onClick = { vm.duplicateSummary = emptyList() }) { Text(tr(TextKey.OK)) } })
+    vm.error?.let { message -> AlertDialog(onDismissRequest = { vm.error = null }, title = { Text(tr(TextKey.OPERATION_INCOMPLETE)) }, text = { Text(message) }, confirmButton = { TextButton(onClick = { vm.error = null }) { Text(tr(TextKey.OK)) } }) }
+    vm.restoreCandidate?.let { candidate -> ConfirmDialog(tr(TextKey.MERGE_THIS_BACKUP), tr(TextKey.CONTAINS_WAREHOUSES_AND_RECORDS_IDENTICAL_RECORDS_ARE_NOT_ADDED, candidate.warehouses.size, candidate.records.size, vm.restoreDuplicateNotice(candidate)), tr(TextKey.CHECK_AND_MERGE), { vm.restoreCandidate = null }) {
         vm.restoreCandidate = null; vm.duplicateOnRestore = false
         vm.restoreBackup(candidate)
     } }
-    if (vm.migrationVoidedCount > 0) AlertDialog(onDismissRequest = {}, title = { Text("旧记录已按 SN 唯一规则整理") }, text = {
-        Text("旧任务合并后有 ${vm.migrationVoidedCount} 条重复 SN 记录。每个 SN 保留最近修改的一条，其他移入作废页，原记录和修改历史均保留。")
-    }, confirmButton = { TextButton(onClick = vm::acknowledgeMigration, enabled = !vm.busy) { Text("知道了") } })
+    if (vm.migrationVoidedCount > 0) AlertDialog(onDismissRequest = {}, title = { Text(tr(TextKey.OLDER_RECORDS_UPDATED_FOR_UNIQUE_SNS)) }, text = {
+        Text(tr(TextKey.FOUND_DUPLICATE_SN_RECORDS_ACROSS_OLDER_TASKS_THE_MOST, vm.migrationVoidedCount))
+    }, confirmButton = { TextButton(onClick = vm::acknowledgeMigration, enabled = !vm.busy) { Text(tr(TextKey.OK)) } })
 }
 
 @Composable
@@ -360,8 +370,8 @@ internal fun WarehouseHeader(label: String) {
 internal fun ChoiceRow(options: List<Pair<String, String>>, selected: String, enabled: Boolean = true, onSelect: (String) -> Unit) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         options.forEach { (id, label) ->
-            if (id == selected) Button(onClick = { onSelect(id) }, enabled = enabled, modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(label, maxLines = 1) }
-            else OutlinedButton(onClick = { onSelect(id) }, enabled = enabled, modifier = Modifier.weight(1f).height(40.dp), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(label, maxLines = 1) }
+            if (id == selected) Button(onClick = { onSelect(id) }, enabled = enabled, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(label, maxLines = 2, textAlign = TextAlign.Center) }
+            else OutlinedButton(onClick = { onSelect(id) }, enabled = enabled, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 4.dp)) { Text(label, maxLines = 2, textAlign = TextAlign.Center) }
         }
     }
 }
@@ -375,21 +385,21 @@ private fun CodeField(label: String, value: String, change: (String) -> Unit, mo
 
 @Composable
 private fun ScanButton(field: String, enabled: Boolean, scan: () -> Unit) {
-    FilledTonalButton(onClick = scan, enabled = enabled, modifier = Modifier.height(52.dp), contentPadding = PaddingValues(horizontal = 10.dp)) { Text("扫描 $field", fontSize = 12.sp) }
+    FilledTonalButton(onClick = scan, enabled = enabled, modifier = Modifier.height(52.dp), contentPadding = PaddingValues(horizontal = 10.dp)) { Text(tr(TextKey.SCAN, field), fontSize = 12.sp) }
 }
 
 @Composable
 internal fun ConfirmDialog(title: String, message: String, confirm: String, dismiss: () -> Unit, action: () -> Unit) {
     AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message, Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) },
-        confirmButton = { TextButton(onClick = action) { Text(confirm) } }, dismissButton = { TextButton(onClick = dismiss) { Text("取消") } })
+        confirmButton = { TextButton(onClick = action) { Text(confirm) } }, dismissButton = { TextButton(onClick = dismiss) { Text(tr(TextKey.CANCEL)) } })
 }
 
 @Composable
 internal fun DuplicateModeDialog(title: String, message: String, dismiss: () -> Unit, choose: (DuplicateMode) -> Unit) {
     AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message) },
         confirmButton = { Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { choose(DuplicateMode.ADD_QUANTITY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("添加到已有数量") }
-            OutlinedButton(onClick = { choose(DuplicateMode.NEW_ENTRY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("新增条目") }
-            TextButton(onClick = dismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+            Button(onClick = { choose(DuplicateMode.ADD_QUANTITY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.ADD_TO_EXISTING_QUANTITY)) }
+            OutlinedButton(onClick = { choose(DuplicateMode.NEW_ENTRY) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.CREATE_NEW_ENTRY)) }
+            TextButton(onClick = dismiss, modifier = Modifier.fillMaxWidth()) { Text(tr(TextKey.CANCEL)) }
         } })
 }
