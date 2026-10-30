@@ -23,6 +23,8 @@ import com.fieldstock.app.model.ImportMetadata
 import com.fieldstock.app.model.ImportReceipt
 import com.fieldstock.app.model.RecoveryPoint
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.backup.BackupMerge
+import com.fieldstock.app.backup.BackupMergeChoices
 import java.io.ByteArrayOutputStream
 import org.json.JSONObject
 import org.json.JSONArray
@@ -550,6 +552,56 @@ class InventoryRepository(context: Context) : AutoCloseable {
         imported.size
     }
 
+    /** Name resolutions, original history, quantity merges and replay markers commit together. */
+    @Synchronized
+    fun importBackup(incoming: InventorySnapshot, choices: BackupMergeChoices = BackupMergeChoices()): MutationResult = transaction { db ->
+        val current = readSnapshot(db)
+        val recordIds = (current.records + incoming.records).mapTo(mutableSetOf()) { it.id }
+        val taskIds = (current.tasks + incoming.tasks).mapTo(mutableSetOf()) { it.id }
+        val warehouseIds = (current.warehouses + incoming.warehouses).mapTo(mutableSetOf()) { it.id }
+        incoming.changes.forEach { change ->
+            validateId(change.id)
+            require(change.recordId in recordIds) { tr(TextKey.THE_RECORD_LINKED_TO_CHANGE_HISTORY_DOES_NOT_EXIST) }
+            validateChange(change, taskIds, warehouseIds)
+        }
+        val plan = BackupMerge.prepare(current, incoming, choices)
+        val oldIds = current.records.mapTo(mutableSetOf()) { it.id }
+        val count = restore(plan.snapshot)
+        val added = plan.snapshot.records.filter { it.id !in oldIds }
+        plan.snapshot.records.forEach { source ->
+            plan.sources[source.id]?.let { original ->
+                val stored = findRecord(db, source.id)!!
+                val marker = JSONObject().put("source", recordJson(original))
+                    .put("destination", JSONObject().put("warehouseId", stored.warehouseId))
+                val after = JSONObject(recordJson(stored)).put("backupImport", marker).toString()
+                insertChange(db, ChangeLog(newId(), stored.id, "UPDATE", recordJson(stored), after, maxOf(System.currentTimeMillis(), stored.updatedAt)))
+            }
+        }
+        fun partKey(record: StockRecord) = Triple(record.warehouseId, record.bom, record.condition)
+        val targets = current.records.filter { it.kind == ItemKind.PART && !it.voided && it.bom.isNotEmpty() }
+            .sortedWith(compareBy<StockRecord> { it.createdAt }.thenBy { it.id }).groupBy(::partKey)
+            .mapValuesTo(mutableMapOf()) { it.value.first().id }
+        added.forEach { source ->
+            if (source.kind != ItemKind.PART || source.voided || source.bom.isEmpty()) return@forEach
+            val key = partKey(source)
+            val target = targets[key]?.let { findRecord(db, it) }
+            if (source.warehouseId in plan.quantityWarehouses && target != null) {
+                val history = db.query("changes", null, "record_id = ?", arrayOf(source.id), null, null, "at ASC, id ASC").use { c ->
+                    buildList { while (c.moveToNext()) add(ChangeLog(c.string("id"), c.string("record_id"), c.string("action"), c.string("before_json"), c.string("after_json"), c.long("at"))) }
+                }
+                val archived = JSONArray().apply { history.forEach { change ->
+                    put(JSONObject().put("id", change.id).put("recordId", change.recordId).put("action", change.action)
+                        .put("before", JSONObject(change.before)).put("after", JSONObject(change.after)).put("at", change.at))
+                } }
+                combineParts(db, target, listOf(findRecord(db, source.id)!!), consumeSources = true, sourceHistory = archived)
+            } else if (target == null) targets[key] = source.id
+        }
+        val newMachines = added.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapNotNull { findRecord(db, it.id)?.takeIf { row -> row.voided } }
+        // Validate rewritten history and merged state before the outer transaction can commit.
+        restore(readSnapshot(db))
+        MutationResult(count, newMachines)
+    }
+
     @Synchronized
     override fun close() = helper.close()
 
@@ -585,7 +637,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             null, null, "created_at ASC, id ASC", "1").use { if (it.moveToFirst()) readRecord(it) else null }
     }
 
-    private fun combineParts(db: SQLiteDatabase, target: StockRecord, sources: List<StockRecord>, consumeSources: Boolean) {
+    private fun combineParts(db: SQLiteDatabase, target: StockRecord, sources: List<StockRecord>, consumeSources: Boolean, sourceHistory: JSONArray? = null) {
         val quantity = target.quantity.toLong() + sources.sumOf { it.quantity.toLong() }
         require(quantity in 1..MAX_QUANTITY.toLong()) { tr(TextKey.MERGED_QUANTITY_EXCEEDS_NO_RECORDS_WERE_CHANGED, MAX_QUANTITY) }
         val details = sources.filter { it.location.isNotEmpty() || it.note.isNotEmpty() }.map { source ->
@@ -597,7 +649,16 @@ class InventoryRepository(context: Context) : AutoCloseable {
         validateRecord(after)
         db.update("records", recordValues(after), "id = ?", arrayOf(target.id))
         val auditAfter = JSONObject(recordJson(after)).put("mergedSources", JSONArray().apply {
-            sources.forEach { put(JSONObject(recordJson(it))) }
+            sources.forEach { source -> put(JSONObject(recordJson(source)).apply {
+                if (sourceHistory != null) put("history", sourceHistory)
+                else if (consumeSources) {
+                    val history = db.query("changes", arrayOf("after_json"), "record_id = ?", arrayOf(source.id), null, null, null).use { c ->
+                        buildList { while (c.moveToNext()) add(c.getString(0)) }
+                    }
+                    val markers = BackupMerge.markers(history).distinctBy { it.toString() }
+                    if (markers.isNotEmpty()) put("backupOrigins", JSONArray().apply { markers.forEach { put(JSONObject().put("backupImport", it)) } })
+                }
+            }) }
         }).toString()
         require(auditAfter.length <= 65536) { tr(TextKey.TOO_MANY_MERGE_SOURCES_MERGE_IN_SMALLER_BATCHES) }
         insertChange(db, ChangeLog(newId(), target.id, "UPDATE", recordJson(target), auditAfter, now))

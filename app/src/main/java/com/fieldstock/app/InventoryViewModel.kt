@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.core.content.FileProvider
 import com.fieldstock.app.backup.AutomaticBackup
 import com.fieldstock.app.backup.AutomaticBackups
+import com.fieldstock.app.backup.BackupMergeChoices
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.importdata.ImportRow
@@ -231,13 +232,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         performMutation(tr(TextKey.RESTORE_COMPLETE), recoveryLabel = tr(TextKey.RESTORE_VOIDED_RECORD, record?.let { warehouseLabel(it.warehouseId) + " / " + it.bom } ?: id), notify = true) { it.restoreVoided(id, mode) }
     }
 
-    fun restoreBackup(candidate: InventorySnapshot) {
-        AppDiagnostics.event("backup.merge.confirmed",mapOf("records" to candidate.records.size,"warehouses" to candidate.warehouses.size))
+    fun restoreBackup(candidate: InventorySnapshot, choices: BackupMergeChoices = BackupMergeChoices()) {
+        AppDiagnostics.event("backup.merge.confirmed",mapOf("records" to candidate.records.size,"warehouses" to candidate.warehouses.size,
+            "country_resolutions" to choices.countries.size,"warehouse_merges" to choices.warehouses.values.count { it.action.name == "MERGE" },
+            "warehouse_renames" to choices.warehouses.values.count { it.action.name == "RENAME" },"parts_mode" to choices.mode.name))
         performMutation(tr(TextKey.BACKUP_MERGED), recoveryLabel = tr(TextKey.MERGE_JSON_BACKUP), notify = true, queueIfBusy = true) { repository ->
-            val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
-            val count = repository.restore(candidate)
-            val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
-            MutationResult(count, repository.snapshot().records.filter { it.id !in beforeIds && it.id in expectedActive && it.voided })
+            repository.importBackup(candidate, choices)
         }
     }
 

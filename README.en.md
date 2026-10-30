@@ -6,7 +6,7 @@ An offline inventory app for one person using one Android phone. Count parts and
 
 ## Download and install
 
-Requires **Android 8.0 or later**. Current source: **2.4.4** (version code 10).
+Requires **Android 8.0 or later**. Current release: **2.4.4 hotfix** (version code 10, unchanged).
 
 [2.4.4 release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
 
@@ -33,6 +33,8 @@ BOMs contain 1–14 letters or digits. PNs allow up to 100 letters/digits with m
 File selection now shows reading progress and brings the preview into view. Documents returned during startup or a backup check wait for that operation instead of being discarded. Local diagnostics retain operation history, errors and UI stalls; developer tools can filter, export and share a diagnostic bundle.
 
 In **Files → Import**, choose an exported **Excel workbook, CSV ZIP, full JSON backup** or standard CSV directly. Chinese and English files work in either interface language. Excel/CSV rows go into the selected warehouse; JSON backups retain their original countries, warehouses, records and history and require confirmation before merging.
+
+For a country name conflict, add the backup warehouses to the existing country. For a warehouse name conflict, merge it or rename it before adding. Matching parts with the same BOM and condition can become separate entries or add to the existing quantity. Reimporting the same backup does not add its quantities again. Source history is retained and the import can be undone through local recovery points. This hotfix also fixes a focus crash when opening **More** on the counting screen.
 
 The downloadable **UTF-8 CSV** template accepts Chinese, English or mixed headers in this order. English headers and fixed values are case-insensitive.
 

@@ -26,6 +26,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +82,10 @@ class MainActivity : LocalizedActivity() {
 private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     val context = LocalContext.current
     val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val density = LocalDensity.current
+    var countHeight by remember { mutableIntStateOf(0) }
+    fun clearFocus() = clearInputFocus(focus) { keyboard?.hide() }
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var entered by rememberSaveable { mutableStateOf(false) }
     var page by rememberSaveable { mutableIntStateOf(0) }
@@ -132,7 +138,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         editingId = record.id; attempted = false; keepBom = false; page = 0
     }
     fun submit(input: RecordInput, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
-        focus.clearFocus()
+        clearFocus()
         val updateId = editingId
         vm.duplicateOnRestore = false
         val after = { clearForm(keepBom && input.kind == ItemKind.MACHINE && updateId == null) }
@@ -156,7 +162,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         }
     }
     fun scan(field: String) {
-        focus.clearFocus(); scanField = field
+        clearFocus(); scanField = field
         scanLauncher.launch(Intent(context, ScanActivity::class.java).putExtra("field", field))
     }
     val createXlsx = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), vm::export)
@@ -199,15 +205,16 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         if (!keyboardVisible) NavigationBar(containerColor = Color.White) {
             val icons = listOf(Icons.Default.Edit, Icons.Default.List, Icons.Default.Share, Icons.Default.Settings)
             listOf(tr(TextKey.COUNT), tr(TextKey.RECORDS_3), tr(TextKey.FILES), tr(TextKey.SETTINGS)).forEachIndexed { index, title ->
-                NavigationBarItem(selected = page == index, onClick = { focus.clearFocus(); page = index },
+                NavigationBarItem(selected = page == index, onClick = { clearFocus(); page = index },
                     icon = { Icon(icons[index], contentDescription = title) }, label = { Text(title) }, enabled = !vm.busy)
             }
         }
     }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
             when (page) {
-                0 -> BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val compact = maxHeight < 390.dp || keyboardVisible
+                // Keep focusable fields out of a constraint subcomposition during IME resizing.
+                0 -> Box(Modifier.fillMaxSize().onSizeChanged { countHeight = it.height }) {
+                    val compact = with(density) { countHeight.toDp() } < 390.dp || keyboardVisible
                     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                       Column(Modifier.fillMaxWidth().weight(1f).then(if (kind == "MACHINE") Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()) else Modifier),
                           verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
@@ -215,7 +222,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                             Box(Modifier.weight(1f)) { ChoiceRow(listOf("PART" to tr(TextKey.PARTS), "MACHINE" to tr(TextKey.MACHINE)), kind, !vm.busy && editingId == null) {
                                 kind = it; attempted = false
                             } }
-                            TextButton(onClick = { focus.clearFocus(); moreOpen = true }, enabled = !vm.busy) { Text(tr(TextKey.MORE)) }
+                            TextButton(onClick = { keyboard?.hide(); moreOpen = true }, enabled = !vm.busy, modifier = Modifier.testTag("count-more")) { Text(tr(TextKey.MORE)) }
                         }
                         else Text(if (editingId != null) tr(TextKey.EDIT_2, if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE)) else if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE), fontSize = 13.sp, color = Petrol)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -267,7 +274,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                                 val snValid = kind != "MACHINE" || (pending && sn.isBlank()) || IdentifierRules.validateSn(sn.trim()) == null
                                 if (pending && bom.isBlank() && (kind != "MACHINE" || (sn.isBlank() && pn.isBlank())) && note.isBlank()) vm.error = tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
                                 else if (bomValid && pnValid && snValid && count != null && count in 1..1_000_000_000) {
-                                    focus.clearFocus()
+                                    clearFocus()
                                     val previous = vm.snapshot.records.find { it.id == editingId }
                                     val input = RecordInput(previous?.taskId ?: vm.storageTaskId, vm.warehouseId, ItemKind.valueOf(kind), bom.trim(),
                                         if (kind == "MACHINE") sn.trim() else "", count, condition, note.trim(), location = previous?.location.orEmpty(),
@@ -290,7 +297,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                                     } else submit(input)
                                 }
                             }, enabled = !vm.busy, modifier = Modifier.weight(1f).height(48.dp)) { Text(if (editingId == null) tr(TextKey.SAVE_RECORD) else tr(TextKey.SAVE_CHANGES), fontSize = 17.sp) }
-                            TextButton(onClick = { focus.clearFocus(); confirmClearInput = true }, enabled = dirty && !vm.busy) { Text(if (editingId == null) tr(TextKey.CLEAR) else tr(TextKey.CANCEL)) }
+                            TextButton(onClick = { clearFocus(); confirmClearInput = true }, enabled = dirty && !vm.busy) { Text(if (editingId == null) tr(TextKey.CLEAR) else tr(TextKey.CANCEL)) }
                         }
                         if (!compact) {
                             val active = vm.snapshot.records.filter { !it.voided && it.warehouseId == vm.warehouseId }
@@ -312,7 +319,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                         when (type) { "xlsx" -> createXlsx.launch(tr(TextKey.FIELDSTOCK_XLSX, stamp)); "csv" -> createCsv.launch(tr(TextKey.FIELDSTOCK_CSV_ZIP, stamp)); else -> createBackup.launch(tr(TextKey.FIELDSTOCK_FULL_BACKUP_JSON_2, stamp)) }
                     }
                 }, onImport = {
-                    focus.clearFocus(); AppDiagnostics.event("import.picker.open")
+                    clearFocus(); AppDiagnostics.event("import.picker.open")
                     try { importFile.launch(arrayOf("*/*")) }
                     catch(e:Exception){ AppDiagnostics.event("import.picker.failed",level="ERROR",failure=e);vm.error=tr(TextKey.COULD_NOT_READ_IMPORT_FILE,e.message) }
                 },
@@ -333,7 +340,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                 Text(tr(TextKey.SCAN, tr(TextKey.NOTE)))
             }
         }
-    }, confirmButton = { TextButton(onClick = { focus.clearFocus(); moreOpen = false }) { Text(tr(TextKey.DONE)) } })
+    }, confirmButton = { TextButton(onClick = { keyboard?.hide(); moreOpen = false }) { Text(tr(TextKey.DONE)) } })
     switchWarehouse?.let { next -> ConfirmDialog(tr(TextKey.SWITCH_WAREHOUSE), tr(TextKey.SWITCHING_WILL_CLEAR_THE_UNSAVED_INPUT), tr(TextKey.DISCARD_INPUT_AND_SWITCH), { switchWarehouse = null }) {
         clearForm(); keepBom = false; vm.select(next); entered = true; page = 0; switchWarehouse = null
     } }
@@ -380,10 +387,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
             vm.duplicateSummary.forEach { Text("BOM：${it.bom}\nSN：${it.sn}\n${vm.warehouseLabel(it.warehouseId)}", modifier = Modifier.padding(top = 8.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
         } }, confirmButton = { TextButton(onClick = { vm.duplicateSummary = emptyList() }) { Text(tr(TextKey.OK)) } })
     vm.error?.let { message -> AlertDialog(onDismissRequest = { vm.error = null }, title = { Text(tr(TextKey.OPERATION_INCOMPLETE)) }, text = { Text(message) }, confirmButton = { TextButton(onClick = { vm.error = null }) { Text(tr(TextKey.OK)) } }) }
-    vm.restoreCandidate?.let { candidate -> ConfirmDialog(tr(TextKey.MERGE_THIS_BACKUP), tr(TextKey.CONTAINS_WAREHOUSES_AND_RECORDS_IDENTICAL_RECORDS_ARE_NOT_ADDED, candidate.warehouses.size, candidate.records.size, vm.restoreDuplicateNotice(candidate)), tr(TextKey.CHECK_AND_MERGE), { vm.restoreCandidate = null }) {
-        vm.restoreCandidate = null; vm.duplicateOnRestore = false
-        vm.restoreBackup(candidate)
-    } }
+    vm.restoreCandidate?.let { candidate -> BackupMergeDialog(vm, candidate) }
     if (vm.migrationVoidedCount > 0) AlertDialog(onDismissRequest = {}, title = { Text(tr(TextKey.OLDER_RECORDS_UPDATED_FOR_UNIQUE_SNS)) }, text = {
         Text(tr(TextKey.FOUND_DUPLICATE_SN_RECORDS_ACROSS_OLDER_TASKS_THE_MOST, vm.migrationVoidedCount))
     }, confirmButton = { TextButton(onClick = vm::acknowledgeMigration, enabled = !vm.busy) { Text(tr(TextKey.OK)) } })
