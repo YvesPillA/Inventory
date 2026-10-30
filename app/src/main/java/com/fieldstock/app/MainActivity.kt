@@ -308,7 +308,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     vm.prepareExport(type, type != "backup") {
                         when (type) { "xlsx" -> createXlsx.launch(tr(TextKey.FIELDSTOCK_XLSX, stamp)); "csv" -> createCsv.launch(tr(TextKey.FIELDSTOCK_CSV_ZIP, stamp)); else -> createBackup.launch(tr(TextKey.FIELDSTOCK_FULL_BACKUP_JSON_2, stamp)) }
                     }
-                }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("text/csv", "text/comma-separated-values", "application/vnd.ms-excel", "text/plain")) },
+                }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("*/*")) },
                     onTemplate = { vm.prepareExport("template", false) { createTemplate.launch(tr(TextKey.FIELDSTOCK_IMPORT_TEMPLATE_CSV)) } }, backups = backupActions)
                 else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions)
             }
