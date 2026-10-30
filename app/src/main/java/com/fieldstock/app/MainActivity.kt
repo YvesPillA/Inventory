@@ -40,6 +40,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.fieldstock.app.model.*
 import com.fieldstock.app.scan.ScanActivity
 import com.fieldstock.app.i18n.*
+import com.fieldstock.app.diagnostics.AppDiagnostics
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
@@ -164,6 +165,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     val createTemplate = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv"), vm::export)
     val importFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewImport)
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), vm::previewRestore)
+    LaunchedEffect(page,entered) { AppDiagnostics.event("ui.page",mapOf("page" to if(entered)page else -1)) }
+    LaunchedEffect(vm.error) { vm.error?.let { AppDiagnostics.event("ui.error.shown",mapOf("message" to it),"ERROR") } }
     fun restoreBackup() {
         if (dirty) vm.error = tr(TextKey.THERE_IS_UNSAVED_INPUT_SAVE_OR_CLEAR_IT_BEFORE)
         else { vm.duplicateOnRestore = false; restore.launch(arrayOf("application/json", "application/octet-stream", "text/plain")) }
@@ -308,7 +311,11 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     vm.prepareExport(type, type != "backup") {
                         when (type) { "xlsx" -> createXlsx.launch(tr(TextKey.FIELDSTOCK_XLSX, stamp)); "csv" -> createCsv.launch(tr(TextKey.FIELDSTOCK_CSV_ZIP, stamp)); else -> createBackup.launch(tr(TextKey.FIELDSTOCK_FULL_BACKUP_JSON_2, stamp)) }
                     }
-                }, onImport = { focus.clearFocus(); importFile.launch(arrayOf("*/*")) },
+                }, onImport = {
+                    focus.clearFocus(); AppDiagnostics.event("import.picker.open")
+                    try { importFile.launch(arrayOf("*/*")) }
+                    catch(e:Exception){ AppDiagnostics.event("import.picker.failed",level="ERROR",failure=e);vm.error=tr(TextKey.COULD_NOT_READ_IMPORT_FILE,e.message) }
+                },
                     onTemplate = { vm.prepareExport("template", false) { createTemplate.launch(tr(TextKey.FIELDSTOCK_IMPORT_TEMPLATE_CSV)) } }, backups = backupActions)
                 else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions)
             }

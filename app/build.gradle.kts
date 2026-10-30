@@ -12,11 +12,18 @@ android {
         applicationId = "com.fieldstock.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "2.4.3"
+        versionCode = 10
+        versionName = "2.4.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
+    // Private local verifier configuration is excluded from source archives and Git.
+    val developerProperties = Properties().apply {
+        rootProject.file(".signing/developer.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+    }
+    val developerKeyHash = developerProperties.getProperty("developerKeySha256", "").trim()
+    require(developerKeyHash.isEmpty() || developerKeyHash.matches(Regex("[a-f0-9]{64}"))) { "Invalid local developer verifier configuration" }
+    defaultConfig { buildConfigField("String", "DEVELOPER_KEY_SHA256", "\"$developerKeyHash\"") }
     // Both languages must remain available when the user switches inside the app.
     bundle { language { enableSplit = false } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -151,8 +153,8 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
         RecoveryAccess(vm, onStructureChanged)
         OutlinedButton(onClick = onRestore, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text(tr(TextKey.MERGE_FROM_BACKUP)) }
         Text(tr(TextKey.BOM_UP_TO_14_LETTERS_OR_DIGITS_SN_TWO), fontSize = 14.sp, color = Color(0xFF526775))
-        Text(tr(TextKey.APP_VERSION), fontSize = 12.sp, color = Color.Gray)
         vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
+        DeveloperEntry(vm)
     }
     rename?.let { request -> AlertDialog(onDismissRequest = { rename = null }, title = { Text(tr(TextKey.RENAME)) },
         text = { OutlinedTextField(name, { name = it }, label = { Text(tr(TextKey.NEW_NAME)) }, singleLine = true, enabled = !vm.busy) },
@@ -332,23 +334,33 @@ internal fun DuplicateModePicker(mode: DuplicateMode, onSelect: (DuplicateMode) 
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, onImport: () -> Unit, onTemplate: () -> Unit, backups: BackupActions) {
     var section by rememberSaveable { mutableStateOf("export") }
     var targetWarehouse by rememberSaveable { mutableStateOf(vm.warehouseId) }
     var mode by remember { mutableStateOf(DuplicateMode.NEW_ENTRY) }
     var confirm by remember { mutableStateOf(false) }
+    val previewRequester=remember { BringIntoViewRequester() }
+    LaunchedEffect(vm.importResultVersion,section) {
+        if(section=="import" && vm.importRows!=null) { kotlinx.coroutines.delay(120); previewRequester.bringIntoView() }
+    }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ChoiceRow(listOf("import" to tr(TextKey.IMPORT), "export" to tr(TextKey.EXPORT)), section, !vm.busy) { section = it } }
         Box(Modifier.weight(1f)) {
             if (section == "export") ExportPage(vm, onExport, backups)
             else Column(Modifier.fillMaxSize().testTag("import-page").verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(tr(TextKey.IMPORT_INVENTORY_FILE), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                if(vm.importReading) Row(Modifier.testTag("import-reading"),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(Modifier.size(22.dp),strokeWidth=2.dp)
+                    Text(tr(TextKey.READING_IMPORT_FILE),color=Petrol,fontSize=14.sp)
+                }
                 OutlinedButton(onClick = onTemplate, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.DOWNLOAD_IMPORT_TEMPLATE)) }
-                Button(onClick = onImport, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("import-choose-file")) { Text(tr(TextKey.CHOOSE_CSV_FILE)) }
+                Button(onClick = onImport, enabled = !vm.busy && !vm.importReading, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("import-choose-file")) { Text(tr(TextKey.CHOOSE_CSV_FILE)) }
                 WarehousePicker(vm, tr(TextKey.USE_AS_IMPORT_DESTINATION), allowCreate = false) { targetWarehouse = it }
                 Text(tr(TextKey.IMPORT_DESTINATION, vm.warehouseLabel(targetWarehouse)), fontWeight = FontWeight.Medium)
                 DuplicateModePicker(mode) { mode = it }
                 vm.importRows?.let { rows ->
+                  Column(Modifier.bringIntoViewRequester(previewRequester).testTag("import-preview"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                     val preview = vm.importPreview(targetWarehouse, mode)
                     Text(tr(TextKey.FILE_READ_ROWS_CONFIRM_TO_IMPORT_INTO_THE_SELECTED, vm.importFileName, rows.size), color = Teal)
                     Text(preview.description(), fontSize = 14.sp)
@@ -356,6 +368,7 @@ internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, 
                     if (repeated.isNotEmpty()) Text(repeated, color = Amber, fontSize = 13.sp)
                     Button(onClick = { confirm = true }, enabled = rows.isNotEmpty() && preview.issue == null && !vm.busy,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.PREVIEW_AND_CONFIRM_IMPORT)) }
+                  }
                 }
                 vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
                 Text(tr(TextKey.IMPORT_HELP_COMPACT), modifier = Modifier.testTag("import-help"), color = Petrol, fontSize = 13.sp)

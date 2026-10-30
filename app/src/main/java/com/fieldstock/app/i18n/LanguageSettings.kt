@@ -15,6 +15,7 @@ object LanguageSettings {
         check(context.getSharedPreferences("fieldstock", Context.MODE_PRIVATE).edit()
             .putString(KEY, language.tag).commit())
         AppLanguage.current = language
+        com.fieldstock.app.diagnostics.AppDiagnostics.event("language.changed",mapOf("language" to language.tag))
     }
 
     fun localizedContext(context: Context): Context {

@@ -4,6 +4,7 @@ import com.fieldstock.app.model.IdentifierRules
 import com.fieldstock.app.model.ItemKind
 import com.fieldstock.app.model.InventorySnapshot
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.diagnostics.AppDiagnostics
 import com.fieldstock.app.i18n.*
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -36,6 +37,7 @@ object InventoryImport {
         val count = source.read(prefix)
         source.reset()
         val json = count > 0 && prefix.copyOf(count).toString(Charsets.UTF_8).removePrefix("\uFEFF").trimStart().startsWith("{")
+        AppDiagnostics.event("import.format",mapOf("format" to if(json)"JSON" else if(count>=2&&prefix[0]==80.toByte()&&prefix[1]==75.toByte())"XLSX_OR_ZIP" else "CSV"))
         return if (json) InventoryImportContent.Backup(InventoryFiles.readBackup(source))
         else InventoryImportContent.Rows(read(source, fileName))
     }
