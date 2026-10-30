@@ -2,6 +2,8 @@ package com.fieldstock.app.importdata
 
 import com.fieldstock.app.model.IdentifierRules
 import com.fieldstock.app.model.ItemKind
+import com.fieldstock.app.model.InventorySnapshot
+import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.i18n.*
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -20,8 +22,23 @@ data class ImportRow(
     val pn: String = ""
 )
 
-/** Standard CSV only. Parsing never evaluates spreadsheet formula text or changes identifier case. */
+sealed interface InventoryImportContent {
+    data class Rows(val rows: List<ImportRow>) : InventoryImportContent
+    data class Backup(val snapshot: InventorySnapshot) : InventoryImportContent
+}
+
+/** Content determines format. Parsing never evaluates formulas or changes identifier case. */
 object InventoryImport {
+    fun readFile(input: InputStream, fileName: String?): InventoryImportContent {
+        val source = input.buffered()
+        source.mark(4096)
+        val prefix = ByteArray(4096)
+        val count = source.read(prefix)
+        source.reset()
+        val json = count > 0 && prefix.copyOf(count).toString(Charsets.UTF_8).removePrefix("\uFEFF").trimStart().startsWith("{")
+        return if (json) InventoryImportContent.Backup(InventoryFiles.readBackup(source))
+        else InventoryImportContent.Rows(read(source, fileName))
+    }
     /** Hash parsed values, so a rename, UTF-8 BOM or line-ending change does not evade the reminder. */
     fun fingerprint(rows: List<ImportRow>): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -44,7 +61,7 @@ object InventoryImport {
     private const val MAX_FIELD_CHARS = 4000
     private val header = listOf("类型", "BOM", "SN", "数量", "状态", "备注")
     private val englishHeader = listOf("Type", "BOM", "SN", "Quantity", "Condition", "Note")
-    private fun isHeader(fields: List<String>): Boolean = fields.size in 6..7 &&
+    internal fun isHeader(fields: List<String>): Boolean = fields.size in 6..7 &&
         header.indices.all { fields[it] == header[it] || fields[it].equals(englishHeader[it], ignoreCase = true) } &&
         (fields.size == 6 || fields[6].equals("PN", ignoreCase = true))
     private enum class State { START, UNQUOTED, QUOTED, AFTER_QUOTE }
@@ -59,8 +76,12 @@ object InventoryImport {
     fun read(input: InputStream, fileName: String?): List<ImportRow> {
         val bytes = readLimited(input)
         if (bytes.size >= 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()) {
-            invalid(1, tr(TextKey.ONLY_STANDARD_CSV_IS_SUPPORTED_XLSX_AND_ZIP_CANNOT))
+            return InventoryReportImport.read(bytes)
         }
+        return readCsv(bytes, fileName)
+    }
+
+    internal fun readCsv(bytes: ByteArray, fileName: String?): List<ImportRow> {
         val text = try {
             Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix("\uFEFF")
@@ -76,10 +97,12 @@ object InventoryImport {
         var rowStartLine = 1
         var foundHeader = false
         var expectedColumns = 0
+        var reportColumns: ReportColumns? = null
+        var headers = emptyList<String>()
         var index = 0
 
         fun finishField() {
-            if (fields.size >= 7) invalid(rowStartLine, tr(TextKey.CSV_TOO_MANY_COLUMNS))
+            if (fields.size >= 64) invalid(rowStartLine, tr(TextKey.IMPORT_TOO_MANY_COLUMNS))
             fields.add(field.toString())
             field.setLength(0)
             state = State.START
@@ -88,14 +111,18 @@ object InventoryImport {
             finishField()
             if (fields.any { it.isNotBlank() }) {
                 if (!foundHeader) {
-                    if (!isHeader(fields)) invalid(rowStartLine, tr(TextKey.HEADERS_MUST_BE_IN_THIS_ORDER_TYPE_BOM_SN))
+                    if (!isHeader(fields)) {
+                        reportColumns = InventoryReportImport.columns(fields)
+                            ?: invalid(rowStartLine, tr(TextKey.HEADERS_MUST_BE_IN_THIS_ORDER_TYPE_BOM_SN))
+                    }
                     foundHeader = true
                     expectedColumns = fields.size
+                    headers = fields.toList()
                 } else {
-                    if (isHeader(fields)) invalid(rowStartLine, tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW))
+                    if (isHeader(fields) || fields == headers) invalid(rowStartLine, tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW))
                     if (fields.size != expectedColumns) invalid(rowStartLine, tr(TextKey.CSV_COLUMN_COUNT, expectedColumns, fields.size))
                     if (rows.size >= MAX_ROWS) invalid(rowStartLine, tr(TextKey.DATA_MUST_NOT_EXCEED_10000_ROWS_IMPORT_IN_SMALLER))
-                    rows.add(validate(fields, rowStartLine))
+                    rows.add(validate(reportColumns?.standardFields(fields) ?: fields, rowStartLine))
                 }
             }
             fields.clear()
@@ -140,7 +167,7 @@ object InventoryImport {
         return rows
     }
 
-    private fun validate(fields: List<String>, line: Int): ImportRow {
+    internal fun validate(fields: List<String>, line: Int): ImportRow {
         val kind = when (fields[0].lowercase(java.util.Locale.ROOT)) {
             "配件", "part", "parts" -> ItemKind.PART
             "整机", "machine", "machines" -> ItemKind.MACHINE

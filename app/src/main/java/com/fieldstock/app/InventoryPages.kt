@@ -341,14 +341,10 @@ internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, 
         Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) { ChoiceRow(listOf("import" to tr(TextKey.IMPORT), "export" to tr(TextKey.EXPORT)), section, !vm.busy) { section = it } }
         Box(Modifier.weight(1f)) {
             if (section == "export") ExportPage(vm, onExport, backups)
-            else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            else Column(Modifier.fillMaxSize().testTag("import-page").verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(tr(TextKey.IMPORT_INVENTORY_FILE), fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text(tr(TextKey.USE_THE_CSV_TEMPLATE_ENTER_BOM_AND_SN_AS), fontSize = 14.sp, color = Petrol)
-                Text(tr(TextKey.BILINGUAL_IMPORT_HELP), fontSize = 13.sp, color = Petrol)
-                Text(tr(TextKey.CSV_VALUE_HELP), fontSize = 13.sp, color = Petrol)
-                Text(tr(TextKey.IMPORT_HISTORY_HAS_BEEN_RECORDED_ON_THIS_PHONE_SINCE), fontSize = 13.sp, color = Petrol)
                 OutlinedButton(onClick = onTemplate, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.DOWNLOAD_IMPORT_TEMPLATE)) }
-                Button(onClick = onImport, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.CHOOSE_CSV_FILE)) }
+                Button(onClick = onImport, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("import-choose-file")) { Text(tr(TextKey.CHOOSE_CSV_FILE)) }
                 WarehousePicker(vm, tr(TextKey.USE_AS_IMPORT_DESTINATION), allowCreate = false) { targetWarehouse = it }
                 Text(tr(TextKey.IMPORT_DESTINATION, vm.warehouseLabel(targetWarehouse)), fontWeight = FontWeight.Medium)
                 DuplicateModePicker(mode) { mode = it }
@@ -361,8 +357,8 @@ internal fun ProcessingPage(vm: InventoryViewModel, onExport: (String) -> Unit, 
                     Button(onClick = { confirm = true }, enabled = rows.isNotEmpty() && preview.issue == null && !vm.busy,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.PREVIEW_AND_CONFIRM_IMPORT)) }
                 }
-                Text(tr(TextKey.TO_REVERSE_A_BATCH_OPERATION_USE_UNDO_IMPORTANT_OPERATION), color = Petrol, fontSize = 13.sp)
                 vm.message?.let { Text(it, color = Teal, fontSize = 13.sp) }
+                Text(tr(TextKey.IMPORT_HELP_COMPACT), modifier = Modifier.testTag("import-help"), color = Petrol, fontSize = 13.sp)
             }
         }
     }

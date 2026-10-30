@@ -17,6 +17,7 @@ import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.importdata.ImportRow
 import com.fieldstock.app.importdata.InventoryImport
+import com.fieldstock.app.importdata.InventoryImportContent
 import com.fieldstock.app.importdata.ImportPreview
 import com.fieldstock.app.model.*
 import com.fieldstock.app.i18n.*
@@ -323,12 +324,18 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     val name = runCatching { resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                         if (cursor.moveToFirst()) cursor.getString(0) else null
                     } }.getOrNull()?.filterNot(Char::isISOControl)?.take(200)?.ifBlank { null } ?: uri.lastPathSegment?.take(200) ?: tr(TextKey.CSV_FILE)
-                    val rows = resolver.openInputStream(uri)?.use { InventoryImport.read(it, name) } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
-                    Triple(rows, name, InventoryImport.fingerprint(rows))
+                    val content = resolver.openInputStream(uri)?.use { InventoryImport.readFile(it, name) } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
+                    content to name
                 }
-                importRows = loaded.first; importFileName = loaded.second; importFingerprint = loaded.third
-                message = tr(TextKey.READ_ROWS_CHOOSE_A_TARGET_WAREHOUSE_AND_CONFIRM_IMPORT, loaded.first.size)
-            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; error = tr(TextKey.COULD_NOT_READ_IMPORT_FILE, e.message) }
+                importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null
+                when (val content = loaded.first) {
+                    is InventoryImportContent.Rows -> {
+                        importRows = content.rows; importFileName = loaded.second; importFingerprint = InventoryImport.fingerprint(content.rows)
+                        message = tr(TextKey.READ_ROWS_CHOOSE_A_TARGET_WAREHOUSE_AND_CONFIRM_IMPORT, content.rows.size)
+                    }
+                    is InventoryImportContent.Backup -> { message = null; restoreCandidate = content.snapshot }
+                }
+            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null; error = tr(TextKey.COULD_NOT_READ_IMPORT_FILE, e.message) }
             finally { busy = false }
         }
     }
