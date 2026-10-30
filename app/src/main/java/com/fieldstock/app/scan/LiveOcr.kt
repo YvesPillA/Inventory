@@ -31,7 +31,14 @@ data class TrackedCode(val id: Long, val code: LocatedCode, val observations: In
 
 object LiveOcr {
     /** Extract each physical line separately; repeated values on different lines retain their boxes. */
-    fun locate(lines: List<LiveTextLine>, field: IdentifierField): List<LocatedCode> = lines.flatMap { line ->
+    fun locate(lines: List<LiveTextLine>, field: IdentifierField): List<LocatedCode> {
+        if (field == IdentifierField.NOTE) {
+            val visible = lines.filter { it.text.isNotBlank() }
+            if (visible.isEmpty() || visible.any { !it.bounds.insideImage() }) return emptyList()
+            val text = visible.joinToString("\n") { it.text }
+            return OcrCandidates.extract(text, field).map { LocatedCode(it, CodeBox.union(visible.map(LiveTextLine::bounds))) }
+        }
+        return lines.flatMap { line ->
         var offset = 0
         val spans = line.elements.mapNotNull { element ->
             val start = line.text.indexOf(element.text, offset)
@@ -48,7 +55,8 @@ object LiveOcr {
             // A code touching the crop boundary may be the readable fragment of a longer identifier.
             if (box.insideImage()) LocatedCode(candidate, box) else null
         }
-    }.sortedWith(compareBy<LocatedCode> { it.bounds.centerY }.thenBy { it.bounds.left })
+        }.sortedWith(compareBy<LocatedCode> { it.bounds.centerY }.thenBy { it.bounds.left })
+    }
 }
 
 /** One-to-one, frame-local association: no old row survives a missing/replaced detection. */

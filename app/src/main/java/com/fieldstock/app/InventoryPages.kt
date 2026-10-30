@@ -14,6 +14,7 @@ import com.fieldstock.app.i18n.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
@@ -198,6 +199,39 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
     }
 }
 
+/** Uses the same saved BOM state for typed input and confirmed scanner results. */
+@Composable
+internal fun PartBomLookup(records: List<StockRecord>, warehouseId: String, bom: String, modifier: Modifier = Modifier) {
+    val query = bom.trim()
+    val matches = remember(records, warehouseId, query) {
+        records.filter { !it.voided && it.warehouseId == warehouseId && it.kind == ItemKind.PART &&
+            query.isNotEmpty() && it.bom.contains(query, ignoreCase = true) }.sortedByDescending { it.updatedAt }
+    }
+    val exact = matches.filter { it.bom == query }
+    LazyColumn(modifier.fillMaxWidth().testTag("part-bom-lookup"), verticalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = PaddingValues(vertical = 6.dp)) {
+        item {
+            Text(if (query.isEmpty()) tr(TextKey.BOM_LOOKUP_EMPTY) else if (exact.isEmpty()) tr(TextKey.BOM_NOT_RECORDED)
+                else tr(TextKey.BOM_ALREADY_RECORDED, exact.size, exact.sumOf { it.quantity.toLong() }),
+                fontSize = 14.sp, fontWeight = FontWeight.Medium, color = if (exact.isEmpty()) Petrol else Teal)
+        }
+        if (query.isNotEmpty()) {
+            item { Text(tr(TextKey.BOM_LOOKUP_SCOPE), fontSize = 11.sp, color = Color.Gray) }
+            if (matches.isNotEmpty()) item { Text(tr(TextKey.BOM_MATCHING_RECORDS, matches.size), fontSize = 12.sp, color = Petrol) }
+            items(matches, key = { it.id }) { record ->
+                Surface(color = Color.White, shape = MaterialTheme.shapes.small) {
+                    Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(record.bom, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
+                        Text(tr(TextKey.PARTS_PCS, record.quantity) + " · " + conditionLabel(record.condition), fontSize = 13.sp, color = Petrol)
+                        if (record.note.isNotEmpty()) Text(record.note, fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Text(InventoryViewModel.formatTime(record.updatedAt), fontSize = 11.sp, color = Color.Gray)
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, onVoid: (StockRecord) -> Unit,
@@ -212,7 +246,7 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
     val categoryRecords = vm.snapshot.records.filter { it.warehouseId == vm.warehouseId && it.voided == voided }
     val records = categoryRecords.filter {
         (filter == "ALL" || if (filter == "PART") it.kind == ItemKind.PART else if (filter == "MACHINE") it.kind == ItemKind.MACHINE else it.condition == StockCondition.PENDING) &&
-            (query.isBlank() || it.bom.contains(query.trim(), true) || it.sn.contains(query.trim(), true) || it.note.contains(query.trim(), true))
+            (query.isBlank() || it.bom.contains(query.trim(), true) || it.pn.contains(query.trim(), true) || it.sn.contains(query.trim(), true) || it.note.contains(query.trim(), true))
     }.sortedByDescending { it.updatedAt }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         ChoiceRow(listOf("active" to tr(TextKey.ACTIVE), "voided" to tr(TextKey.VOIDED)), category, !vm.busy) { category = it; selecting = false; selected = emptySet() }
@@ -252,7 +286,8 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
                             Text(if (record.kind == ItemKind.PART) tr(TextKey.PARTS_PCS, record.quantity) else tr(TextKey.MACHINE_1_UNIT), fontWeight = FontWeight.Medium)
                             Text(if (voided) tr(TextKey.VOIDED_2) else conditionLabel(record.condition), color = if (record.condition == StockCondition.NORMAL && !voided) Teal else Amber, fontSize = 12.sp)
                         }
-                        Text(record.bom.ifEmpty { tr(TextKey.BOM_PENDING_VERIFICATION) }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
+                        if (record.kind == ItemKind.PART || record.bom.isNotEmpty()) Text(record.bom.ifEmpty { tr(TextKey.BOM_PENDING_VERIFICATION) }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
+                        if (record.pn.isNotEmpty()) Text("PN: " + record.pn, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
                         if (record.kind == ItemKind.MACHINE) Text(record.sn.ifEmpty { tr(TextKey.SN_PENDING_VERIFICATION) }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
                         if (record.note.isNotEmpty()) Text(record.note, fontSize = 13.sp)
                         Text(InventoryViewModel.formatTime(record.updatedAt), fontSize = 11.sp, color = Color.Gray)

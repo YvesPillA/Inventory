@@ -12,8 +12,8 @@ android {
         applicationId = "com.fieldstock.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "2.4.1"
+        versionCode = 8
+        versionName = "2.4.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true }
@@ -22,6 +22,8 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isIncludeAndroidResources = true }
+    // Build instrumentation against the same Kotlin module/variant as the installed APK.
+    testBuildType = providers.gradleProperty("testBuildType").getOrElse("debug")
     packaging {
         // Compress bundled native libraries to keep downloadable APKs small.
         jniLibs.useLegacyPackaging = true

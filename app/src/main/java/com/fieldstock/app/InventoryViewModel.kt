@@ -361,7 +361,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         performMutation(tr(TextKey.IMPORT_COMPLETE), after = { importRows = null; importFileName = ""; importFingerprint = "" },
             recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true) { repository ->
             repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
-                sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual") }, mode, metadata)
+                sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual",
+                pn = row.pn, sourcePn = if (row.pn.isNotEmpty()) "import" else "manual") }, mode, metadata)
         }
     }
 

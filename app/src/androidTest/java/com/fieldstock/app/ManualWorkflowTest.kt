@@ -89,7 +89,7 @@ class ManualWorkflowTest {
     }
 
     private fun enter(label: String, text: String) {
-        compose.onNodeWithText(label).assertIsDisplayed().performTextReplacement(text)
+        compose.onNode(if (label == "BOM") hasTestTag("count-bom") else hasText(label)).assertIsDisplayed().performTextReplacement(text)
     }
     private fun save() { compose.onNodeWithText("保存这一条").assertIsDisplayed().assertIsEnabled().performClick() }
     private fun records(): List<StockRecord> = InventoryRepository(context).use { it.snapshot().records }
@@ -142,7 +142,7 @@ class ManualWorkflowTest {
         compose.waitUntil(10_000) { compose.onAllNodesWithText("一键清除作废").fetchSemanticsNodes().isNotEmpty() }
     }
 
-    private fun editableText(label: String): String? = compose.onAllNodesWithText(label)
+    private fun editableText(label: String): String? = compose.onAllNodes(if (label == "BOM") hasTestTag("count-bom") else hasText(label))
         .fetchSemanticsNodes().firstOrNull { it.config.contains(SemanticsProperties.EditableText) }
         ?.config?.get(SemanticsProperties.EditableText)?.text
 
@@ -677,7 +677,7 @@ class ManualWorkflowTest {
         assertEquals(0, count())
         compose.onNodeWithText("确认并填入").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("SN 前段").fetchSemanticsNodes().isNotEmpty() }
-        assertEquals("MODEL024", compose.onNodeWithText("BOM").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+        assertEquals("MODEL024", compose.onNodeWithTag("count-bom").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
         assertEquals("ABCDEFG", compose.onNodeWithText("SN 前段").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
         assertEquals("1234567", compose.onNodeWithText("SN 后段").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
         save()

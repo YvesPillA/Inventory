@@ -18,7 +18,7 @@ class InventoryImportTest {
     @Test fun templateIsUtf8BomAndHeaderOnlyWithNoExampleInventory() {
         val output = ByteArrayOutputStream()
         InventoryImport.writeTemplate(output)
-        assertEquals("\uFEFF$header", output.toString(Charsets.UTF_8.name()))
+        assertEquals("\uFEFF" + header.trimEnd('\r', '\n') + ",PN\r\n", output.toString(Charsets.UTF_8.name()))
         assertEquals(emptyList<ImportRow>(), InventoryImport.read(output.toByteArray().inputStream(), "template.csv"))
     }
 

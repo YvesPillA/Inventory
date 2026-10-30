@@ -10,9 +10,9 @@ import java.io.ByteArrayOutputStream
 class BilingualImportTest {
     @After fun resetLanguage() { AppLanguage.current = AppLanguage.CHINESE }
 
-    private fun header(language: AppLanguage): String = ByteArrayOutputStream().also {
+    private fun header(language: AppLanguage, withPn: Boolean = false): String = ByteArrayOutputStream().also {
         InventoryImport.writeTemplate(it, language)
-    }.toString("UTF-8")
+    }.toString("UTF-8").let { if (withPn) it else it.replace(",PN\r\n", "\r\n") }
 
     @Test fun eitherTemplateAndEitherValueLanguageWorkUnderEitherUiLanguage() {
         for (ui in AppLanguage.entries) for (template in AppLanguage.entries) for (values in AppLanguage.entries) {
@@ -66,9 +66,9 @@ class BilingualImportTest {
     }
 
     @Test fun downloadedTemplatesAreHeaderOnlyAndAlwaysReadable() {
-        assertEquals("\uFEFFType,BOM,SN,Quantity,Condition,Note\r\n", header(AppLanguage.ENGLISH))
-        assertEquals("\uFEFF类型,BOM,SN,数量,状态,备注\r\n", header(AppLanguage.CHINESE))
-        for (language in AppLanguage.entries) assertTrue(InventoryImport.read(header(language).byteInputStream(), null).isEmpty())
+        assertEquals("\uFEFFType,BOM,SN,Quantity,Condition,Note,PN\r\n", header(AppLanguage.ENGLISH, true))
+        assertEquals("\uFEFF类型,BOM,SN,数量,状态,备注,PN\r\n", header(AppLanguage.CHINESE, true))
+        for (language in AppLanguage.entries) assertTrue(InventoryImport.read(header(language, true).byteInputStream(), null).isEmpty())
     }
 
     @Test fun formattingDoesNotInterpretOrTranslateUserArguments() {

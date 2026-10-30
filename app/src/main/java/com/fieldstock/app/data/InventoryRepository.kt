@@ -254,6 +254,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
             createdAt = previous?.createdAt ?: now,
             updatedAt = maxOf(now, previous?.createdAt ?: 0L),
             voided = false,
+            pn = if (input.kind == ItemKind.MACHINE) input.pn.trim() else "",
+            sourcePn = if (input.kind == ItemKind.MACHINE) input.sourcePn else "manual",
+            rawPn = if (input.kind == ItemKind.MACHINE) input.rawPn else "",
         )
         validateRecord(record)
         require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { tr(TextKey.INVENTORY_TASK_DOES_NOT_EXIST) }
@@ -555,7 +558,10 @@ class InventoryRepository(context: Context) : AutoCloseable {
         var record = StockRecord(newId(), input.taskId, input.warehouseId, input.kind,
             input.bom.trim(), if (input.kind == ItemKind.MACHINE) input.sn.trim() else "",
             if (input.kind == ItemKind.MACHINE) 1 else input.quantity, input.condition.trim(), input.note.trim(), input.location.trim(),
-            input.sourceBom, input.sourceSn, input.rawBom, input.rawSn, now, now, false)
+            input.sourceBom, input.sourceSn, input.rawBom, input.rawSn, now, now, false,
+            pn = if (input.kind == ItemKind.MACHINE) input.pn.trim() else "",
+            sourcePn = if (input.kind == ItemKind.MACHINE) input.sourcePn else "manual",
+            rawPn = if (input.kind == ItemKind.MACHINE) input.rawPn else "")
         validateRecord(record)
         require(exists(db, "tasks", "id = ?", arrayOf(record.taskId))) { tr(TextKey.LEGACY_RECORD_GROUP_DOES_NOT_EXIST) }
         require(exists(db, "warehouses", "id = ?", arrayOf(record.warehouseId))) { tr(TextKey.WAREHOUSE_DOES_NOT_EXIST) }
@@ -665,14 +671,16 @@ class InventoryRepository(context: Context) : AutoCloseable {
         validateId(record.warehouseId)
         require(record.condition in CONDITIONS) { tr(TextKey.CONDITION_MUST_BE_NORMAL_DAMAGED_OR_PENDING_VERIFICATION) }
         val pending = record.condition == StockCondition.PENDING
-        require(!pending || record.bom.isNotEmpty() || record.sn.isNotEmpty() || record.note.isNotBlank()) {
+        require(!pending || record.bom.isNotEmpty() || record.sn.isNotEmpty() || record.pn.isNotEmpty() || record.note.isNotBlank()) {
             tr(TextKey.PENDING_DRAFTS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
         }
-        if (!pending || record.bom.isNotEmpty()) {
+        if ((record.kind == ItemKind.PART && !pending) || record.bom.isNotEmpty()) {
             IdentifierRules.validateBom(record.bom)?.let { throw IllegalArgumentException(it) }
         }
         require(record.bom == record.bom.trim()) { tr(TextKey.BOM_HAS_LEADING_OR_TRAILING_SPACES) }
         if (record.kind == ItemKind.MACHINE) {
+            if (record.pn.isNotEmpty()) IdentifierRules.validatePn(record.pn)?.let { throw IllegalArgumentException(it) }
+            require(record.pn == record.pn.trim()) { tr(TextKey.PN_HAS_LEADING_OR_TRAILING_SPACES) }
             if (!pending || record.sn.isNotEmpty()) {
                 IdentifierRules.validateSn(record.sn)?.let { throw IllegalArgumentException(it) }
             }
@@ -680,12 +688,13 @@ class InventoryRepository(context: Context) : AutoCloseable {
             require(record.quantity == 1) { tr(TextKey.MACHINE_QUANTITY_MUST_BE_1) }
         } else {
             require(record.sn.isEmpty()) { tr(TextKey.PARTS_MUST_NOT_HAVE_AN_SN) }
+            require(record.pn.isEmpty()) { tr(TextKey.PARTS_MUST_NOT_HAVE_A_PN) }
             require(record.quantity in 1..MAX_QUANTITY) { tr(TextKey.PARTS_QUANTITY_MUST_BE_BETWEEN_1_AND, MAX_QUANTITY) }
         }
         require(record.note.length <= 4000) { tr(TextKey.NOTES_MUST_NOT_EXCEED_4000_CHARACTERS) }
         require(record.location.length <= 100 && record.location.none(Char::isISOControl)) { tr(TextKey.LOCATION_MUST_NOT_EXCEED_100_CHARACTERS_OR_CONTAIN_LINE) }
-        require(record.sourceBom in SOURCES && record.sourceSn in SOURCES) { tr(TextKey.INVALID_IDENTIFIER_INPUT_SOURCE) }
-        require(record.rawBom.length <= 4000 && record.rawSn.length <= 4000) { tr(TextKey.RAW_RECOGNIZED_TEXT_IS_TOO_LONG) }
+        require(record.sourceBom in SOURCES && record.sourceSn in SOURCES && record.sourcePn in SOURCES) { tr(TextKey.INVALID_IDENTIFIER_INPUT_SOURCE) }
+        require(record.rawBom.length <= 4000 && record.rawSn.length <= 4000 && record.rawPn.length <= 4000) { tr(TextKey.RAW_RECOGNIZED_TEXT_IS_TOO_LONG) }
         require(record.createdAt >= 0 && record.updatedAt >= record.createdAt) { tr(TextKey.INVALID_INVENTORY_RECORD_TIMESTAMP) }
     }
 
@@ -724,7 +733,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             json.getInt("quantity"), json.getString("condition"), json.getString("note"), json.optString("location", ""),
             json.getString("sourceBom"), json.getString("sourceSn"), json.getString("rawBom"),
             json.getString("rawSn"), json.getLong("createdAt"), json.getLong("updatedAt"),
-            json.getBoolean("voided"))
+            json.getBoolean("voided"), json.optString("pn", ""), json.optString("sourcePn", "manual"), json.optString("rawPn", ""))
     } catch (e: Exception) {
         throw IllegalArgumentException(tr(TextKey.CHANGE_HISTORY_IS_MISSING_A_COMPLETE_INVENTORY_RECORD), e)
     }
@@ -736,6 +745,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
         put("kind", record.kind.name)
         put("bom", record.bom)
         put("sn", record.sn)
+        put("pn", record.pn)
+        put("sourcePn", record.sourcePn)
+        put("rawPn", record.rawPn)
         put("quantity", record.quantity)
         put("condition", record.condition)
         put("note", record.note)
@@ -756,6 +768,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         cursor.string("source_bom"), cursor.string("source_sn"), cursor.string("raw_bom"),
         cursor.string("raw_sn"), cursor.long("created_at"), cursor.long("updated_at"),
         cursor.int("voided") != 0,
+        cursor.string("pn"), cursor.string("source_pn"), cursor.string("raw_pn"),
     )
 
     private fun findRecord(db: SQLiteDatabase, id: String): StockRecord? =
@@ -776,6 +789,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
         put("kind", record.kind.name)
         put("bom", record.bom)
         put("sn", record.sn)
+        put("pn", record.pn)
+        put("source_pn", record.sourcePn)
+        put("raw_pn", record.rawPn)
         put("quantity", record.quantity)
         put("condition", record.condition)
         put("note", record.note)
@@ -886,6 +902,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
                 warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
                 kind TEXT NOT NULL CHECK(kind IN ('PART', 'MACHINE')),
                 bom TEXT NOT NULL, sn TEXT NOT NULL,
+                pn TEXT NOT NULL DEFAULT '', source_pn TEXT NOT NULL DEFAULT 'manual', raw_pn TEXT NOT NULL DEFAULT '',
                 quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 1000000000),
                 condition TEXT NOT NULL, note TEXT NOT NULL, location TEXT NOT NULL,
                 source_bom TEXT NOT NULL, source_sn TEXT NOT NULL,
@@ -908,7 +925,13 @@ class InventoryRepository(context: Context) : AutoCloseable {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            require(oldVersion in 1..3 && newVersion == 4) { tr(TextKey.UNSUPPORTED_DATABASE_UPGRADE, oldVersion, newVersion) }
+            require(oldVersion in 1..4 && newVersion == 5) { tr(TextKey.UNSUPPORTED_DATABASE_UPGRADE, oldVersion, newVersion) }
+            val columns = db.rawQuery("PRAGMA table_info(records)", null).use { cursor ->
+                buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+            }
+            mapOf("pn" to "", "source_pn" to "manual", "raw_pn" to "").forEach { (name, default) ->
+                if (name !in columns) db.execSQL("ALTER TABLE records ADD COLUMN " + name + " TEXT NOT NULL DEFAULT '" + default + "'")
+            }
             if (oldVersion < 3) {
             // Preserve every old record. For serials previously repeated in different tasks,
             // keep the latest edited record active and audit the others as voided.
@@ -950,7 +973,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     companion object {
         const val DATABASE_NAME = "fieldstock.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5
         private const val MAX_RECOVERY_BYTES = 96L * 1024 * 1024
         private const val GLOBAL_SN_INDEX = "CREATE UNIQUE INDEX unique_active_sn ON records(sn) WHERE kind = 'MACHINE' AND voided = 0 AND sn != ''"
         private const val MIGRATION_NOTICE_KEY = "migration_voided_duplicates"

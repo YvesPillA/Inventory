@@ -59,8 +59,8 @@ class InventoryFilesTest {
         assertTrue((0 until summary.getElementsByTagName("v").length).any { summary.getElementsByTagName("v").item(it).textContent == "2147483650" })
         assertFalse(detail.documentElement.textContent.contains("99"))
         val machine = parseXml(files.getValue("xl/worksheets/sheet4.xml"))
-        assertEquals("inlineStr", cell(machine, "D2").getAttribute("t"))
-        assertEquals("0001-02AB", cell(machine, "D2").textContent)
+        assertEquals("inlineStr", cell(machine, "E2").getAttribute("t"))
+        assertEquals("0001-02AB", cell(machine, "E2").textContent)
         assertTrue(cell(detail, "J2").textContent.matches(Regex("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(Z|[+-]\\d{2}:\\d{2})")))
     }
 
@@ -190,7 +190,7 @@ class InventoryFilesTest {
         InventoryFiles.writeBackup(data, output)
         val envelope = JSONObject(output.toString(Charsets.UTF_8.name()))
         assertEquals("fieldstock-backup", envelope.getString("format"))
-        assertEquals(1, envelope.getInt("version"))
+        assertEquals(2, envelope.getInt("version"))
         val payload = JSONObject(envelope.getString("payload"))
         assertEquals(2, payload.getJSONArray("tasks").length())
         assertEquals("t1", payload.getJSONArray("records").getJSONObject(0).getString("taskId"))
@@ -224,7 +224,7 @@ class InventoryFilesTest {
     }
 
     @Test fun backupRejectsUnsupportedVersionsAndTrailingData() {
-        val envelope = backupEnvelope().put("version", 2)
+        val envelope = backupEnvelope().put("version", 999)
         assertThrows(IllegalArgumentException::class.java) { InventoryFiles.readBackup(envelope.toString().byteInputStream()) }
         assertThrows(IllegalArgumentException::class.java) { InventoryFiles.readBackup((backupEnvelope().toString() + "{}").byteInputStream()) }
     }

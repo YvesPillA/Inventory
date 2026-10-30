@@ -124,7 +124,7 @@ class BilingualWorkflowTest {
             awaitIdle(modelB)
             onMain { modelB.export(Uri.fromFile(file)) }
             awaitIdle(modelB)
-            assertEquals("\uFEFFType,BOM,SN,Quantity,Condition,Note\r\n", file.readText())
+            assertEquals("\uFEFFType,BOM,SN,Quantity,Condition,Note,PN\r\n", file.readText())
             assertFalse(application.getSharedPreferences("fieldstock", 0).contains("pending_language"))
             unchanged()
         } finally { onMain { storeA.clear(); storeB.clear() }; file.delete() }

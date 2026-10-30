@@ -39,6 +39,18 @@ class OcrInstrumentedTest {
         assertEquals(expected, OcrCandidates.extract(recognized, IdentifierField.SN).single().value)
     }
 
+    @Test fun bundledModelPreservesPnWithMultipleHyphenGroups() {
+        val expected = "000-ABC-02-XYZ"
+        val recognized = recognizePrintedLabel(expected)
+        assertEquals(expected, OcrCandidates.extract(recognized, IdentifierField.PN).single().value)
+    }
+
+    @Test fun bundledModelKeepsBasicPunctuationAndMultipleNoteLines() {
+        val expected = "ABC 123 / 45\nQTY: 6"
+        val recognized = recognizePrintedLabel(expected)
+        assertEquals(expected, OcrCandidates.extract(recognized, IdentifierField.NOTE).single().value)
+    }
+
     private fun recognizePrintedLabel(text: String): String {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
@@ -48,12 +60,14 @@ class OcrInstrumentedTest {
         }
         val padding = 80
         val metrics = paint.fontMetrics
-        val width = ceil(paint.measureText(text).toDouble()).toInt() + padding * 2
-        val height = ceil((metrics.descent - metrics.ascent).toDouble()).toInt() + padding * 2
+        val lines = text.split('\n')
+        val width = ceil(lines.maxOf { paint.measureText(it) }.toDouble()).toInt() + padding * 2
+        val lineHeight = ceil((metrics.descent - metrics.ascent).toDouble()).toInt() + 30
+        val height = lineHeight * lines.size + padding * 2
         val bitmap = Bitmap.createBitmap(appContext.resources.displayMetrics, width, height, Bitmap.Config.ARGB_8888)
         Canvas(bitmap).apply {
             drawColor(Color.WHITE)
-            drawText(text, padding.toFloat(), padding - metrics.ascent, paint)
+            lines.forEachIndexed { index, line -> drawText(line, padding.toFloat(), padding - metrics.ascent + index * lineHeight, paint) }
         }
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val task = recognizer.process(InputImage.fromBitmap(bitmap, 0))
