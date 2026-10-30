@@ -3,7 +3,7 @@ package com.fieldstock.app.scan
 import com.fieldstock.app.i18n.*
 
 /** The field requested by the inventory form. OCR never fills both fields implicitly. */
-enum class IdentifierField { BOM, SN }
+enum class IdentifierField { BOM, SN, PN, NOTE }
 
 data class OcrCandidate(
     val raw: String,
@@ -17,13 +17,18 @@ data class OcrCandidate(
  */
 object OcrCandidates {
     private val fieldLabel = Regex(
-        "(?i)(?<![A-Za-z0-9])(?:BOM(?:\\s*码)?|S/?N(?:\\s*号)?|SERIAL(?:\\s+(?:NO\\.?|NUMBER))?)(?=\\s*[:：=]|\\s+|$)\\s*[:：=]?\\s*",
+        "(?i)(?<![A-Za-z0-9])(?:BOM(?:\\s*码)?|P/?N(?:\\s*号)?|PART\\s+(?:NO\\.?|NUMBER)|S/?N(?:\\s*号)?|SERIAL(?:\\s+(?:NO\\.?|NUMBER))?)(?=\\s*[:：=]|\\s+|$)\\s*[:：=]?\\s*",
     )
     // Keep malformed punctuation inside a token so AB_001 is rejected, never sliced into AB / 001.
     private val token = Regex("[^\\s,;，；()\\[\\]{}]+(?:\\s*[-－–—−]\\s*[^\\s,;，；()\\[\\]{}]+)*")
-    private val reservedWords = setOf("BOM", "SN", "S", "N", "SERIAL", "NO", "NUMBER", "MODEL", "QTY")
+    private val reservedWords = setOf("BOM", "PN", "P", "PART", "SN", "S", "N", "SERIAL", "NO", "NUMBER", "MODEL", "QTY")
 
     fun extract(rawText: String, field: IdentifierField): List<OcrCandidate> {
+        if (field == IdentifierField.NOTE) {
+            val value = rawText.replace("\r\n", "\n").replace('\r', '\n').trim()
+            return if (com.fieldstock.app.model.IdentifierRules.validateScannedNote(value) == null)
+                listOf(OcrCandidate(rawText, value)) else emptyList()
+        }
         val result = mutableListOf<OcrCandidate>()
         rawText.lineSequence().map(String::trim).filter(String::isNotEmpty).forEach { line ->
             val labels = fieldLabel.findAll(line).toList()
@@ -31,10 +36,10 @@ object OcrCandidates {
                 addFromSegment(line, field, explicitlyLabelled = false, result)
             } else {
                 labels.forEachIndexed { index, label ->
-                    val labelledField = if (label.value.trimStart().startsWith("BOM", true)) {
-                        IdentifierField.BOM
-                    } else {
-                        IdentifierField.SN
+                    val labelledField = when {
+                        label.value.trimStart().startsWith("BOM", true) -> IdentifierField.BOM
+                        label.value.trimStart().startsWith("P", true) -> IdentifierField.PN
+                        else -> IdentifierField.SN
                     }
                     if (labelledField == field) {
                         val end = labels.getOrNull(index + 1)?.range?.first ?: line.length
@@ -84,6 +89,8 @@ object OcrCandidates {
         if (value.uppercase() in reservedWords) return false
         return when (field) {
             IdentifierField.BOM -> value.length in 1..14 && value.all(::isAsciiAlphanumeric)
+            IdentifierField.PN -> com.fieldstock.app.model.IdentifierRules.validatePn(value) == null
+            IdentifierField.NOTE -> false // Notes are handled as a complete block above.
             IdentifierField.SN -> {
                 val parts = value.split('-')
                 parts.size == 2 && parts.all { it.isNotEmpty() && it.all(::isAsciiAlphanumeric) } &&
@@ -94,6 +101,10 @@ object OcrCandidates {
 
     private fun mayJoinSpaces(value: String, field: IdentifierField): Boolean {
         if (field == IdentifierField.SN) return value.count { it == '-' } == 1
+        if (field == IdentifierField.PN && '-' in value) {
+            // Join only whitespace around separators, never two independent codes.
+            return !value.replace(Regex("\\s*-\\s*"), "-").any(Char::isWhitespace)
+        }
         val parts = value.trim().split(Regex("\\s+"))
         return parts.all { part -> part.all { it in '0'..'9' } } ||
             (parts.first().all { it in 'A'..'Z' || it in 'a'..'z' } &&

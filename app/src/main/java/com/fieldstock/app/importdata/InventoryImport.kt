@@ -16,7 +16,8 @@ data class ImportRow(
     val sn: String,
     val quantity: Int,
     val condition: String,
-    val note: String
+    val note: String,
+    val pn: String = ""
 )
 
 /** Standard CSV only. Parsing never evaluates spreadsheet formula text or changes identifier case. */
@@ -24,9 +25,12 @@ object InventoryImport {
     /** Hash parsed values, so a rename, UTF-8 BOM or line-ending change does not evade the reminder. */
     fun fingerprint(rows: List<ImportRow>): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        digest.update("fieldstock-csv-v1".toByteArray(Charsets.UTF_8))
+        // Preserve receipts for legacy CSVs, including a new template with an empty PN column.
+        val hasPn = rows.any { it.pn.isNotEmpty() }
+        digest.update((if (hasPn) "fieldstock-csv-v2" else "fieldstock-csv-v1").toByteArray(Charsets.UTF_8))
         rows.forEach { row ->
-            listOf(row.kind.name, row.bom, row.sn, row.quantity.toString(), row.condition, row.note).forEach { value ->
+            (listOf(row.kind.name, row.bom, row.sn, row.quantity.toString(), row.condition, row.note) +
+                if (hasPn) listOf(row.pn) else emptyList()).forEach { value ->
                 val bytes = value.toByteArray(Charsets.UTF_8)
                 digest.update(java.nio.ByteBuffer.allocate(4).putInt(bytes.size).array())
                 digest.update(bytes)
@@ -40,14 +44,15 @@ object InventoryImport {
     private const val MAX_FIELD_CHARS = 4000
     private val header = listOf("类型", "BOM", "SN", "数量", "状态", "备注")
     private val englishHeader = listOf("Type", "BOM", "SN", "Quantity", "Condition", "Note")
-    private fun isHeader(fields: List<String>): Boolean = fields.size == header.size &&
-        fields.indices.all { fields[it] == header[it] || fields[it].equals(englishHeader[it], ignoreCase = true) }
+    private fun isHeader(fields: List<String>): Boolean = fields.size in 6..7 &&
+        header.indices.all { fields[it] == header[it] || fields[it].equals(englishHeader[it], ignoreCase = true) } &&
+        (fields.size == 6 || fields[6].equals("PN", ignoreCase = true))
     private enum class State { START, UNQUOTED, QUOTED, AFTER_QUOTE }
 
     /** Header only: example inventory must never accidentally become a real imported record. */
     fun writeTemplate(output: OutputStream, language: AppLanguage = AppLanguage.current) {
         val columns = if (language == AppLanguage.ENGLISH) englishHeader else header
-        output.write(("\uFEFF" + columns.joinToString(",") + "\r\n").toByteArray(Charsets.UTF_8))
+        output.write(("\uFEFF" + (columns + "PN").joinToString(",") + "\r\n").toByteArray(Charsets.UTF_8))
         output.flush()
     }
 
@@ -70,10 +75,11 @@ object InventoryImport {
         var line = 1
         var rowStartLine = 1
         var foundHeader = false
+        var expectedColumns = 0
         var index = 0
 
         fun finishField() {
-            if (fields.size >= header.size) invalid(rowStartLine, tr(TextKey.EXPECTED_6_COLUMNS_FOUND_TOO_MANY_NOTES_CONTAINING_COMMAS))
+            if (fields.size >= 7) invalid(rowStartLine, tr(TextKey.CSV_TOO_MANY_COLUMNS))
             fields.add(field.toString())
             field.setLength(0)
             state = State.START
@@ -84,9 +90,10 @@ object InventoryImport {
                 if (!foundHeader) {
                     if (!isHeader(fields)) invalid(rowStartLine, tr(TextKey.HEADERS_MUST_BE_IN_THIS_ORDER_TYPE_BOM_SN))
                     foundHeader = true
+                    expectedColumns = fields.size
                 } else {
                     if (isHeader(fields)) invalid(rowStartLine, tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW))
-                    if (fields.size != header.size) invalid(rowStartLine, tr(TextKey.EXPECTED_6_COLUMNS_FOUND_NOTES_CONTAINING_COMMAS_OR_LINE, fields.size))
+                    if (fields.size != expectedColumns) invalid(rowStartLine, tr(TextKey.CSV_COLUMN_COUNT, expectedColumns, fields.size))
                     if (rows.size >= MAX_ROWS) invalid(rowStartLine, tr(TextKey.DATA_MUST_NOT_EXCEED_10000_ROWS_IMPORT_IN_SMALLER))
                     rows.add(validate(fields, rowStartLine))
                 }
@@ -141,18 +148,21 @@ object InventoryImport {
         }
         val bom = fields[1]
         val sn = fields[2]
+        val pn = fields.getOrElse(6) { "" }
         val condition = StockCondition.parse(fields[4]) ?: invalid(line, tr(TextKey.CONDITION_MUST_BE_NORMAL_DAMAGED_OR_PENDING_VERIFICATION_CHINESE))
         val note = fields[5]
         val pending = condition == StockCondition.PENDING
-        if (!pending || bom.isNotEmpty()) IdentifierRules.validateBom(bom)?.let { invalid(line, it) }
+        if ((kind == ItemKind.PART && !pending) || bom.isNotEmpty()) IdentifierRules.validateBom(bom)?.let { invalid(line, it) }
         if (kind == ItemKind.PART && sn.isNotEmpty()) invalid(line, tr(TextKey.SN_MUST_BE_EMPTY_FOR_PARTS))
+        if (kind == ItemKind.PART && pn.isNotEmpty()) invalid(line, tr(TextKey.PARTS_MUST_NOT_HAVE_A_PN))
+        if (pn.isNotEmpty()) IdentifierRules.validatePn(pn)?.let { invalid(line, it) }
         if (kind == ItemKind.MACHINE && (!pending || sn.isNotEmpty())) IdentifierRules.validateSn(sn)?.let { invalid(line, it) }
-        if (pending && bom.isEmpty() && sn.isEmpty() && note.isBlank()) invalid(line, tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A_2))
+        if (pending && bom.isEmpty() && sn.isEmpty() && pn.isEmpty() && note.isBlank()) invalid(line, tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A_2))
         val quantityText = fields[3]
         val quantity = if (quantityText.isNotEmpty() && quantityText.all { it in '0'..'9' }) quantityText.toIntOrNull() else null
         if (quantity == null || quantity !in 1..MAX_QUANTITY) invalid(line, tr(TextKey.QUANTITY_MUST_BE_AN_INTEGER_BETWEEN_1_AND_1000000000))
         if (kind == ItemKind.MACHINE && quantity != 1) invalid(line, tr(TextKey.MACHINE_QUANTITY_MUST_BE_1_2))
-        return ImportRow(kind, bom, sn, quantity, condition, note)
+        return ImportRow(kind, bom, sn, quantity, condition, note, pn)
     }
 
     private fun readLimited(input: InputStream): ByteArray {

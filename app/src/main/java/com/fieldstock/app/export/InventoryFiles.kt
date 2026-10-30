@@ -29,7 +29,7 @@ import java.util.zip.ZipOutputStream
 object InventoryFiles {
     const val MAX_BACKUP_BYTES: Int = 32 * 1024 * 1024
     private const val FORMAT = "fieldstock-backup"
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val MAX_ITEMS = 200_000
     private const val MAX_STRING_LENGTH = 100_000
     private val dateFormat = DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ssXXX")
@@ -146,7 +146,8 @@ object InventoryFiles {
             val envelope = parseObject(jsonText.removePrefix("\uFEFF"))
             envelope.exactKeys("format", "version", "payload", "checksum")
             require(envelope.string("format") == FORMAT) { tr(TextKey.THIS_IS_NOT_A_FIELDSTOCK_BACKUP_FILE) }
-            require(envelope.integer("version") == VERSION.toLong()) { tr(TextKey.THIS_BACKUP_VERSION_IS_NOT_SUPPORTED) }
+            val version = envelope.integer("version")
+            require(version in 1..VERSION.toLong()) { tr(TextKey.THIS_BACKUP_VERSION_IS_NOT_SUPPORTED) }
             val payload = envelope.string("payload", MAX_BACKUP_BYTES)
             val checksum = envelope.string("checksum")
             require(checksum.matches(Regex("[a-f0-9]{64}"))) { tr(TextKey.INVALID_BACKUP_CHECKSUM_FORMAT) }
@@ -167,7 +168,8 @@ object InventoryFiles {
                     Warehouse(row.id(), row.string("countryId"), row.string("name"))
                 },
                 records = data.objects("records") { row ->
-                    row.exactKeys("id", "taskId", "warehouseId", "kind", "bom", "sn", "quantity", "condition", "location", "note", "sourceBom", "sourceSn", "rawBom", "rawSn", "createdAt", "updatedAt", "voided")
+                    val keys = arrayOf("id", "taskId", "warehouseId", "kind", "bom", "sn", "quantity", "condition", "location", "note", "sourceBom", "sourceSn", "rawBom", "rawSn", "createdAt", "updatedAt", "voided")
+                    row.exactKeys(*(if (version >= 2) keys + arrayOf("pn", "sourcePn", "rawPn") else keys))
                     val quantity = row.integer("quantity")
                     require(quantity in 1..Int.MAX_VALUE.toLong()) { tr(TextKey.RECORD_QUANTITY_MUST_BE_A_POSITIVE_INTEGER) }
                     StockRecord(
@@ -175,7 +177,10 @@ object InventoryFiles {
                         kind = ItemKind.valueOf(row.string("kind")), bom = row.string("bom"), sn = row.string("sn"),
                         quantity = quantity.toInt(), condition = row.string("condition"), note = row.string("note"), location = row.string("location"),
                         sourceBom = row.string("sourceBom"), sourceSn = row.string("sourceSn"), rawBom = row.string("rawBom"), rawSn = row.string("rawSn"),
-                        createdAt = row.nonNegativeLong("createdAt"), updatedAt = row.nonNegativeLong("updatedAt"), voided = row.boolean("voided")
+                        createdAt = row.nonNegativeLong("createdAt"), updatedAt = row.nonNegativeLong("updatedAt"), voided = row.boolean("voided"),
+                        pn = if (version >= 2) row.string("pn") else "",
+                        sourcePn = if (version >= 2) row.string("sourcePn") else "manual",
+                        rawPn = if (version >= 2) row.string("rawPn") else ""
                     )
                 },
                 changes = data.objects("changes") { row ->
@@ -190,7 +195,7 @@ object InventoryFiles {
     }
 
     private fun partHeaders(language: AppLanguage) = arrayOf(language.text(TextKey.COUNTRY), language.text(TextKey.WAREHOUSE), "BOM", language.text(TextKey.QUANTITY), language.text(TextKey.UNIT), language.text(TextKey.CONDITION), language.text(TextKey.NOTE), language.text(TextKey.BOM_SOURCE), language.text(TextKey.RAW_BOM_TEXT), language.text(TextKey.CREATED_AT), language.text(TextKey.UPDATED_AT), language.text(TextKey.RECORD_ID))
-    private fun machineHeaders(language: AppLanguage) = arrayOf(language.text(TextKey.COUNTRY), language.text(TextKey.WAREHOUSE), "BOM", "SN", language.text(TextKey.QUANTITY), language.text(TextKey.UNIT), language.text(TextKey.CONDITION), language.text(TextKey.NOTE), language.text(TextKey.BOM_SOURCE), language.text(TextKey.SN_SOURCE), language.text(TextKey.RAW_BOM_TEXT), language.text(TextKey.RAW_SN_TEXT), language.text(TextKey.CREATED_AT), language.text(TextKey.UPDATED_AT), language.text(TextKey.RECORD_ID))
+    private fun machineHeaders(language: AppLanguage) = arrayOf(language.text(TextKey.COUNTRY), language.text(TextKey.WAREHOUSE), "BOM", "PN", "SN", language.text(TextKey.QUANTITY), language.text(TextKey.UNIT), language.text(TextKey.CONDITION), language.text(TextKey.NOTE), language.text(TextKey.BOM_SOURCE), language.text(TextKey.PN_SOURCE), language.text(TextKey.SN_SOURCE), language.text(TextKey.RAW_BOM_TEXT), language.text(TextKey.RAW_PN_TEXT), language.text(TextKey.RAW_SN_TEXT), language.text(TextKey.CREATED_AT), language.text(TextKey.UPDATED_AT), language.text(TextKey.RECORD_ID))
     private fun pendingHeaders(language: AppLanguage) = machineHeaders(language).toMutableList().apply { add(2, language.text(TextKey.TYPE)) }.toTypedArray()
     private data class SummaryKey(val warehouseId: String, val bom: String, val condition: String)
     private sealed interface Cell
@@ -229,11 +234,11 @@ object InventoryFiles {
             val warehouse = warehouses.getValue(record.warehouseId)
             return buildList {
                 add(Text(countries.getValue(warehouse.countryId).name)); add(Text(warehouse.name)); add(Text(record.bom))
-                if (includeSn) add(Text(record.sn))
+                if (includeSn) { add(Text(record.pn)); add(Text(record.sn)) }
                 add(Numeric(record.quantity.toLong())); add(Text(if (record.kind == ItemKind.PART) language.text(TextKey.PCS) else language.text(TextKey.UNIT_2))); add(Text(language.condition(record.condition))); add(Text(record.note)); add(Text(sourceLabel(record.sourceBom)))
-                if (includeSn) add(Text(sourceLabel(record.sourceSn)))
+                if (includeSn) { add(Text(sourceLabel(record.sourcePn))); add(Text(sourceLabel(record.sourceSn))) }
                 add(Text(record.rawBom))
-                if (includeSn) add(Text(record.rawSn))
+                if (includeSn) { add(Text(record.rawPn)); add(Text(record.rawSn)) }
                 add(Text(timestamp(record.createdAt))); add(Text(timestamp(record.updatedAt))); add(Text(record.id))
             }
         }
@@ -308,7 +313,7 @@ object InventoryFiles {
         .put("tasks", jsonArray(tasks) { JSONObject().put("id", it.id).put("name", it.name).put("createdAt", it.createdAt) })
         .put("countries", jsonArray(countries) { JSONObject().put("id", it.id).put("name", it.name) })
         .put("warehouses", jsonArray(warehouses) { JSONObject().put("id", it.id).put("countryId", it.countryId).put("name", it.name) })
-        .put("records", jsonArray(records) { JSONObject().put("id", it.id).put("taskId", it.taskId).put("warehouseId", it.warehouseId).put("kind", it.kind.name).put("bom", it.bom).put("sn", it.sn).put("quantity", it.quantity).put("condition", it.condition).put("note", it.note).put("location", it.location).put("sourceBom", it.sourceBom).put("sourceSn", it.sourceSn).put("rawBom", it.rawBom).put("rawSn", it.rawSn).put("createdAt", it.createdAt).put("updatedAt", it.updatedAt).put("voided", it.voided) })
+        .put("records", jsonArray(records) { JSONObject().put("id", it.id).put("taskId", it.taskId).put("warehouseId", it.warehouseId).put("kind", it.kind.name).put("bom", it.bom).put("sn", it.sn).put("pn", it.pn).put("sourcePn", it.sourcePn).put("rawPn", it.rawPn).put("quantity", it.quantity).put("condition", it.condition).put("note", it.note).put("location", it.location).put("sourceBom", it.sourceBom).put("sourceSn", it.sourceSn).put("rawBom", it.rawBom).put("rawSn", it.rawSn).put("createdAt", it.createdAt).put("updatedAt", it.updatedAt).put("voided", it.voided) })
         .put("changes", jsonArray(changes) { JSONObject().put("id", it.id).put("recordId", it.recordId).put("action", it.action).put("before", it.before).put("after", it.after).put("at", it.at) })
     private fun <T> jsonArray(items: List<T>, convert: (T) -> JSONObject): JSONArray {
         require(items.size <= MAX_ITEMS) { tr(TextKey.THE_BACKUP_CONTAINS_TOO_MANY_RECORDS) }

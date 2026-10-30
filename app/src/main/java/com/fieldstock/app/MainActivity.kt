@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -83,6 +84,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     var page by rememberSaveable { mutableIntStateOf(0) }
     var kind by rememberSaveable { mutableStateOf("PART") }
     var bom by rememberSaveable { mutableStateOf("") }
+    var pn by rememberSaveable { mutableStateOf("") }
     var snFirst by rememberSaveable { mutableStateOf("") }
     var snLast by rememberSaveable { mutableStateOf("") }
     var quantity by rememberSaveable { mutableStateOf("") }
@@ -92,6 +94,8 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     var sourceSn by rememberSaveable { mutableStateOf("manual") }
     var rawBom by rememberSaveable { mutableStateOf("") }
     var rawSn by rememberSaveable { mutableStateOf("") }
+    var sourcePn by rememberSaveable { mutableStateOf("manual") }
+    var rawPn by rememberSaveable { mutableStateOf("") }
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var keepBom by rememberSaveable { mutableStateOf(false) }
     var attempted by rememberSaveable { mutableStateOf(false) }
@@ -109,19 +113,21 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     var activeClearStep by remember { mutableIntStateOf(0) }
     var confirmClearInput by remember { mutableStateOf(false) }
     val sn = if (snFirst.isEmpty() && snLast.isEmpty()) "" else "$snFirst-$snLast"
-    val dirty = bom.isNotBlank() || snFirst.isNotBlank() || snLast.isNotBlank() || quantity.isNotBlank() || note.isNotBlank() || editingId != null
+    val dirty = bom.isNotBlank() || pn.isNotBlank() || snFirst.isNotBlank() || snLast.isNotBlank() || quantity.isNotBlank() || note.isNotBlank() || editingId != null
 
     fun clearForm(keep: Boolean = false) {
         if (!keep) { bom = ""; sourceBom = "manual"; rawBom = "" }
         snFirst = ""; snLast = ""; quantity = ""; note = ""; sourceSn = "manual"; rawSn = ""
+        pn = ""; sourcePn = "manual"; rawPn = ""
         attempted = false; editingId = null; condition = StockCondition.NORMAL
     }
     fun editRecord(record: StockRecord) {
-        kind = record.kind.name; bom = record.bom
+        kind = record.kind.name; bom = record.bom; pn = record.pn
         snFirst = record.sn.substringBefore('-', ""); snLast = record.sn.substringAfter('-', "")
         quantity = if (record.kind == ItemKind.PART) record.quantity.toString() else ""
         condition = record.condition; note = record.note
         sourceBom = record.sourceBom; sourceSn = record.sourceSn; rawBom = record.rawBom; rawSn = record.rawSn
+        sourcePn = record.sourcePn; rawPn = record.rawPn
         editingId = record.id; attempted = false; keepBom = false; page = 0
     }
     fun submit(input: RecordInput, mode: DuplicateMode = DuplicateMode.NEW_ENTRY) {
@@ -140,8 +146,12 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             val value = result.data?.getStringExtra("value").orEmpty()
             val raw = result.data?.getStringExtra("raw").orEmpty()
-            if (scanField == "BOM") { bom = value; rawBom = raw; sourceBom = "ocr" }
-            else { snFirst = value.substringBefore('-', ""); snLast = value.substringAfter('-', ""); rawSn = raw; sourceSn = "ocr" }
+            when (scanField) {
+                "BOM" -> { bom = value; rawBom = raw; sourceBom = "ocr" }
+                "PN" -> { pn = value; rawPn = raw; sourcePn = "ocr" }
+                "NOTE" -> { note = value }
+                "SN" -> { snFirst = value.substringBefore('-', ""); snLast = value.substringAfter('-', ""); rawSn = raw; sourceSn = "ocr" }
+            }
         }
     }
     fun scan(field: String) {
@@ -195,8 +205,9 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
             when (page) {
                 0 -> BoxWithConstraints(Modifier.fillMaxSize()) {
                     val compact = maxHeight < 390.dp || keyboardVisible
-                    Box(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                      Column(Modifier.fillMaxWidth().align(Alignment.TopCenter), verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
+                    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Column(Modifier.fillMaxWidth().weight(1f).then(if (kind == "MACHINE") Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()) else Modifier),
+                          verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
                         if (!keyboardVisible) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.weight(1f)) { ChoiceRow(listOf("PART" to tr(TextKey.PARTS), "MACHINE" to tr(TextKey.MACHINE)), kind, !vm.busy && editingId == null) {
                                 kind = it; attempted = false
@@ -205,11 +216,16 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                         }
                         else Text(if (editingId != null) tr(TextKey.EDIT_2, if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE)) else if (kind == "PART") tr(TextKey.PARTS) else tr(TextKey.MACHINE), fontSize = 13.sp, color = Petrol)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            CodeField("BOM", bom, { bom = it; sourceBom = "manual"; rawBom = "" }, Modifier.weight(1f), !vm.busy,
-                                attempted && !(condition == StockCondition.PENDING && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null)
+                            CodeField(if (kind == "MACHINE") tr(TextKey.OPTIONAL_IDENTIFIER, "BOM") else "BOM", bom, { bom = it; sourceBom = "manual"; rawBom = "" }, Modifier.weight(1f).testTag("count-bom"), !vm.busy,
+                                attempted && !((kind == "MACHINE" || condition == StockCondition.PENDING) && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null)
                             ScanButton("BOM", !vm.busy) { scan("BOM") }
                         }
                         if (kind == "MACHINE") {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                CodeField(tr(TextKey.OPTIONAL_IDENTIFIER, "PN"), pn, { pn = it; sourcePn = "manual"; rawPn = "" }, Modifier.weight(1f).testTag("count-pn"), !vm.busy,
+                                    attempted && pn.isNotBlank() && IdentifierRules.validatePn(pn.trim()) != null)
+                                ScanButton("PN", !vm.busy) { scan("PN") }
+                            }
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 CodeField(tr(TextKey.SN_FIRST_PART), snFirst, { snFirst = it; sourceSn = "manual"; rawSn = "" }, Modifier.weight(1f), !vm.busy)
                                 Text("-", color = Petrol, fontSize = 20.sp)
@@ -226,10 +242,12 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                             modifier = Modifier.fillMaxWidth())
                         if (!compact) Text("${if (editingId == null) conditionLabel(condition) else tr(TextKey.EDITING_RECORD, conditionLabel(condition))}${if (note.isNotEmpty()) tr(TextKey.HAS_NOTES) else ""}",
                             color = if (condition == StockCondition.NORMAL) Teal else Amber, fontSize = 12.sp)
+                        if (kind == "PART") PartBomLookup(vm.snapshot.records, vm.warehouseId, bom, Modifier.weight(1f))
                       }
-                      Column(Modifier.fillMaxWidth().align(Alignment.BottomCenter), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                      Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val formError = if (!attempted) null else when {
-                            !(condition == StockCondition.PENDING && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null -> IdentifierRules.validateBom(bom.trim())
+                            !((kind == "MACHINE" || condition == StockCondition.PENDING) && bom.isBlank()) && IdentifierRules.validateBom(bom.trim()) != null -> IdentifierRules.validateBom(bom.trim())
+                            kind == "MACHINE" && pn.isNotBlank() && IdentifierRules.validatePn(pn.trim()) != null -> IdentifierRules.validatePn(pn.trim())
                             kind == "MACHINE" && !(condition == StockCondition.PENDING && sn.isBlank()) -> IdentifierRules.validateSn(sn.trim())
                             kind == "PART" && quantity.toIntOrNull()?.let { it in 1..1_000_000_000 } != true -> tr(TextKey.QUANTITY_MUST_BE_A_POSITIVE_INTEGER)
                             else -> null
@@ -241,15 +259,17 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                                 attempted = true
                                 val count = if (kind == "MACHINE") 1 else quantity.toIntOrNull()
                                 val pending = condition == StockCondition.PENDING
-                                val bomValid = (pending && bom.isBlank()) || IdentifierRules.validateBom(bom.trim()) == null
+                                val bomValid = ((kind == "MACHINE" || pending) && bom.isBlank()) || IdentifierRules.validateBom(bom.trim()) == null
+                                val pnValid = kind != "MACHINE" || pn.isBlank() || IdentifierRules.validatePn(pn.trim()) == null
                                 val snValid = kind != "MACHINE" || (pending && sn.isBlank()) || IdentifierRules.validateSn(sn.trim()) == null
-                                if (pending && bom.isBlank() && sn.isBlank() && note.isBlank()) vm.error = tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
-                                else if (bomValid && snValid && count != null && count in 1..1_000_000_000) {
+                                if (pending && bom.isBlank() && (kind != "MACHINE" || (sn.isBlank() && pn.isBlank())) && note.isBlank()) vm.error = tr(TextKey.PENDING_RECORDS_REQUIRE_AT_LEAST_ONE_IDENTIFIER_OR_A)
+                                else if (bomValid && pnValid && snValid && count != null && count in 1..1_000_000_000) {
                                     focus.clearFocus()
                                     val previous = vm.snapshot.records.find { it.id == editingId }
                                     val input = RecordInput(previous?.taskId ?: vm.storageTaskId, vm.warehouseId, ItemKind.valueOf(kind), bom.trim(),
                                         if (kind == "MACHINE") sn.trim() else "", count, condition, note.trim(), location = previous?.location.orEmpty(),
-                                        sourceBom = sourceBom, sourceSn = if (kind == "MACHINE") sourceSn else "manual", rawBom = rawBom, rawSn = if (kind == "MACHINE") rawSn else "")
+                                        sourceBom = sourceBom, sourceSn = if (kind == "MACHINE") sourceSn else "manual", rawBom = rawBom, rawSn = if (kind == "MACHINE") rawSn else "",
+                                        pn = if (kind == "MACHINE") pn.trim() else "", sourcePn = if (kind == "MACHINE") sourcePn else "manual", rawPn = if (kind == "MACHINE") rawPn else "")
                                     val active = vm.snapshot.records.filter { !it.voided && it.id != editingId }
                                     val parts = active.filter { input.bom.isNotEmpty() && it.kind == ItemKind.PART && it.warehouseId == vm.warehouseId && it.bom == input.bom && it.condition == input.condition }
                                     val closeSn = active.find { it.kind == ItemKind.MACHINE && it.sn != input.sn && it.sn.equals(input.sn, true) }
@@ -296,12 +316,15 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
         }
     }
     if (moreOpen) AlertDialog(onDismissRequest = { moreOpen = false }, title = { Text(tr(TextKey.CONDITION_AND_NOTES)) }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ChoiceRow(listOf(StockCondition.NORMAL, StockCondition.DAMAGED, StockCondition.PENDING).map {
                 it to if (it == StockCondition.PENDING) tr(TextKey.PENDING_FILTER) else conditionLabel(it)
             }, condition, !vm.busy) { condition = it }
             if (condition == StockCondition.PENDING) Text(tr(TextKey.MISSING_IDENTIFIERS_MAY_BE_LEFT_BLANK_ENTER_AT_LEAST), fontSize = 13.sp)
-            OutlinedTextField(note, { note = it }, label = { Text(tr(TextKey.NOTES_OPTIONAL)) }, maxLines = 3)
+            OutlinedTextField(note, { note = it }, label = { Text(tr(TextKey.NOTES_OPTIONAL)) }, maxLines = 6, modifier = Modifier.fillMaxWidth().testTag("count-note"))
+            OutlinedButton(onClick = { scan("NOTE") }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) {
+                Text(tr(TextKey.SCAN, tr(TextKey.NOTE)))
+            }
         }
     }, confirmButton = { TextButton(onClick = { focus.clearFocus(); moreOpen = false }) { Text(tr(TextKey.DONE)) } })
     switchWarehouse?.let { next -> ConfirmDialog(tr(TextKey.SWITCH_WAREHOUSE), tr(TextKey.SWITCHING_WILL_CLEAR_THE_UNSAVED_INPUT), tr(TextKey.DISCARD_INPUT_AND_SWITCH), { switchWarehouse = null }) {

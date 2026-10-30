@@ -12,7 +12,8 @@ data class StockRecord(
     val bom: String, val sn: String, val quantity: Int, val condition: String, val note: String,
     val location: String,
     val sourceBom: String, val sourceSn: String, val rawBom: String, val rawSn: String,
-    val createdAt: Long, val updatedAt: Long, val voided: Boolean
+    val createdAt: Long, val updatedAt: Long, val voided: Boolean,
+    val pn: String = "", val sourcePn: String = "manual", val rawPn: String = ""
 )
 data class ChangeLog(val id: String, val recordId: String, val action: String, val before: String, val after: String, val at: Long)
 data class MutationResult(val processed: Int, val duplicateMachines: List<StockRecord> = emptyList())
@@ -28,13 +29,25 @@ data class InventorySnapshot(
 data class RecordInput(
     val taskId: String, val warehouseId: String, val kind: ItemKind, val bom: String, val sn: String,
     val quantity: Int, val condition: String, val note: String, val location: String = "",
-    val sourceBom: String = "manual", val sourceSn: String = "manual", val rawBom: String = "", val rawSn: String = ""
+    val sourceBom: String = "manual", val sourceSn: String = "manual", val rawBom: String = "", val rawSn: String = "",
+    val pn: String = "", val sourcePn: String = "manual", val rawPn: String = ""
 )
 class DuplicateSnException(val existing: StockRecord, message: String) : IllegalArgumentException(message)
 
 object IdentifierRules {
     private val bom = Regex("[A-Za-z0-9]{1,14}")
     private val sn = Regex("[A-Za-z0-9]+-[A-Za-z0-9]+")
+    private val pn = Regex("[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
+    fun validatePn(value: String): String? = when {
+        value.isEmpty() -> tr(TextKey.ENTER_A_PN)
+        value.length > 100 || !pn.matches(value) -> tr(TextKey.PN_FORMAT_HELP)
+        else -> null
+    }
+    fun validateScannedNote(value: String): String? = when {
+        value.isBlank() -> tr(TextKey.NO_TEXT_RECOGNIZED)
+        value.length > 4000 -> tr(TextKey.NOTES_MUST_NOT_EXCEED_4000_CHARACTERS)
+        else -> null
+    }
     fun validateBom(value: String): String? = when {
         value.isEmpty() -> tr(TextKey.ENTER_A_BOM)
         !bom.matches(value) -> tr(TextKey.BOM_MUST_CONTAIN_ONLY_LETTERS_AND_DIGITS_UP_TO)

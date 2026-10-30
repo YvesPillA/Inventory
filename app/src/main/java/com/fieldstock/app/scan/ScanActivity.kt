@@ -87,7 +87,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 
 /**
- * On-device label OCR. Launch with extra "field" = "BOM" or "SN".
+ * On-device label OCR. Launch with extra "field" = "BOM", "SN", "PN" or "NOTE".
  * Only a deliberate confirmation returns RESULT_OK, with extras "value" and "raw".
  * The cropped review photo is temporary private cache, removed on rescan/exit.
  */
@@ -125,7 +125,8 @@ class ScanActivity : LocalizedActivity() {
     private var liveOperation = 0L
     private var lastLiveStart = 0L
     internal var liveRevision = 0L; private set
-    private val currentRoi: CodeBox get() = if (continuous) LIVE_ROI else SINGLE_ROI
+    private val currentRoi: CodeBox get() = if (continuous || this.field == IdentifierField.NOTE) LIVE_ROI else SINGLE_ROI
+    private val fieldLabel: String get() = if (this.field == IdentifierField.NOTE) tr(TextKey.NOTE) else this.field.name
     internal val visibleLiveCodes: List<TrackedCode> get() =
         liveFrame?.codes.orEmpty().filter { livePaused || it.stable }
 
@@ -136,9 +137,10 @@ class ScanActivity : LocalizedActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        field = if (intent.getStringExtra(EXTRA_FIELD).equals("SN", ignoreCase = true)) IdentifierField.SN else IdentifierField.BOM
+        field = IdentifierField.entries.firstOrNull { it.name.equals(intent.getStringExtra(EXTRA_FIELD), true) } ?: IdentifierField.BOM
         continuous = savedInstanceState?.getBoolean("continuous")
             ?: getSharedPreferences("fieldstock", 0).getBoolean("continuous_scan", false)
+        if (field == IdentifierField.NOTE) continuous = false
         hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         reviewImages.clearExpired()
         if (savedInstanceState?.getBoolean("showResult") == true) {
@@ -235,12 +237,12 @@ class ScanActivity : LocalizedActivity() {
                         ) {
                             TextButton(onClick = { finish() }, modifier = Modifier.heightIn(min = 48.dp)) { Text(tr(TextKey.BACK)) }
                             Column(Modifier.weight(1f).padding(horizontal = 8.dp)) {
-                                Text(tr(TextKey.SCAN_IDENTIFIER, field.name), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text(tr(if (field == IdentifierField.NOTE) TextKey.SCAN else TextKey.SCAN_IDENTIFIER, fieldLabel), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                 Text(tr(TextKey.ON_DEVICE_RECOGNITION_REVIEW_BEFORE_FILLING), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                             }
                         }
                         HorizontalDivider(color = Color(0xFFE0E7F0))
-                        if (!showResult) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        if (!showResult && field != IdentifierField.NOTE) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (!continuous) Button(onClick = { changeScanMode(false) }, enabled = !busy,
                                 modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(tr(TextKey.SINGLE_SCAN)) }
@@ -325,7 +327,7 @@ class ScanActivity : LocalizedActivity() {
                 Viewfinder(Modifier.fillMaxSize())
                 if (continuous && frozen != null) LiveScanOverlay(visibleLiveCodes, frozen.roi, !busy, ::chooseLiveCode)
                 if (!continuous) Text(
-                    tr(TextKey.PLACE_THE_COMPLETE_LINE_INSIDE_THE_FRAME, field.name),
+                    if (field == IdentifierField.NOTE) tr(TextKey.NOTES_SCAN_FRAME) else tr(TextKey.PLACE_THE_COMPLETE_LINE_INSIDE_THE_FRAME, fieldLabel),
                     color = Color.White,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 20.dp)
@@ -344,8 +346,12 @@ class ScanActivity : LocalizedActivity() {
             Column(Modifier.fillMaxWidth().background(Color(0xFFF4F7FC)).padding(horizontal = 16.dp, vertical = if (continuous) 4.dp else 12.dp)) {
                 if (!continuous) {
                   Text(
-                    if (field == IdentifierField.SN) tr(TextKey.SN_CONTAINS_ONE_HYPHEN_AND_UP_TO_14_LETTERS)
-                    else tr(TextKey.BOM_SUPPORTS_UP_TO_14_LETTERS_AND_DIGITS),
+                    when (field) {
+                        IdentifierField.SN -> tr(TextKey.SN_CONTAINS_ONE_HYPHEN_AND_UP_TO_14_LETTERS)
+                        IdentifierField.PN -> tr(TextKey.PN_FORMAT_HELP)
+                        IdentifierField.NOTE -> tr(TextKey.NOTES_SCAN_HELP)
+                        IdentifierField.BOM -> tr(TextKey.BOM_SUPPORTS_UP_TO_14_LETTERS_AND_DIGITS)
+                    },
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                   )
@@ -402,7 +408,7 @@ class ScanActivity : LocalizedActivity() {
                 onClick = { if (continuous) pauseOrResumeLive() else recognizeFrame() },
                 enabled = !busy && if (continuous) liveFrame != null else cameraReady && !processingFrame,
                 modifier = Modifier.weight(1.6f).heightIn(min = 52.dp),
-            ) { Text(if (busy) tr(TextKey.OPENING_REVIEW) else if (continuous) if (livePaused) tr(TextKey.RESUME_SCANNING) else tr(TextKey.PAUSE_FRAME) else tr(TextKey.RECOGNIZE_IDENTIFIER), fontWeight = FontWeight.Bold) }
+            ) { Text(if (busy) tr(TextKey.OPENING_REVIEW) else if (continuous) if (livePaused) tr(TextKey.RESUME_SCANNING) else tr(TextKey.PAUSE_FRAME) else if (field == IdentifierField.NOTE) tr(TextKey.RECOGNIZE_TEXT) else tr(TextKey.RECOGNIZE_IDENTIFIER), fontWeight = FontWeight.Bold) }
         }
         if (!continuous) TextButton(onClick = { finish() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(tr(TextKey.ENTER_MANUALLY)) }
     }
@@ -415,12 +421,12 @@ class ScanActivity : LocalizedActivity() {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(tr(TextKey.CHECK_THE_LABEL_BEFORE_FILLING), fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text(tr(TextKey.COMPARE_WITH_THE_PHOTO_CHECK_0_O_1_I), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(tr(if (field == IdentifierField.NOTE) TextKey.NOTES_SCAN_HELP else TextKey.COMPARE_WITH_THE_PHOTO_CHECK_0_O_1_I), color = MaterialTheme.colorScheme.onSurfaceVariant)
             reviewPhoto?.let { photo -> LabelPhoto(photo) }
                 ?: Text(tr(TextKey.LABEL_PHOTO_UNAVAILABLE_CHECK_THE_PHYSICAL_LABEL_OR_SCAN), color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             if (candidates.isEmpty()) {
                 Surface(color = Color(0xFFFFF1D6), shape = RoundedCornerShape(8.dp)) {
-                    Text(tr(TextKey.NO_VALID_FOUND_SCAN_AGAIN_OR_ENTER_IT_MANUALLY, field.name), Modifier.padding(14.dp))
+                    Text(tr(TextKey.NO_VALID_FOUND_SCAN_AGAIN_OR_ENTER_IT_MANUALLY, fieldLabel), Modifier.padding(14.dp))
                 }
             } else {
                 Text(if (candidates.size > 1) tr(TextKey.FOUND_CANDIDATES_SELECT_THE_CORRECT_IDENTIFIER, candidates.size) else tr(TextKey.RECOGNIZED_CANDIDATES), fontWeight = FontWeight.SemiBold)
@@ -448,16 +454,21 @@ class ScanActivity : LocalizedActivity() {
             OutlinedTextField(
                 value = editedValue,
                 onValueChange = { editedValue = it },
-                label = { Text(tr(TextKey.FINAL_IDENTIFIER, field.name)) },
+                label = { Text(if (field == IdentifierField.NOTE) tr(TextKey.REVIEW_NOTE) else tr(TextKey.FINAL_IDENTIFIER, fieldLabel)) },
                 supportingText = {
-                    Text(validation ?: if (field == IdentifierField.SN) tr(TextKey.VALID_FORMAT_CHECK_EACH_CHARACTER_AGAINST_THE_LABEL) else tr(TextKey.VALID_FORMAT_CHECK_LEADING_ZEROS_AND_LETTERS))
+                    Text(validation ?: when (field) {
+                        IdentifierField.SN -> tr(TextKey.VALID_FORMAT_CHECK_EACH_CHARACTER_AGAINST_THE_LABEL)
+                        IdentifierField.NOTE -> tr(TextKey.NOTES_SCAN_HELP)
+                        else -> tr(TextKey.VALID_FORMAT_CHECK_LEADING_ZEROS_AND_LETTERS)
+                    })
                 },
                 isError = editedValue.isNotEmpty() && validation != null,
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrect = false),
+                singleLine = field != IdentifierField.NOTE,
+                maxLines = if (field == IdentifierField.NOTE) 8 else 1,
+                keyboardOptions = KeyboardOptions(keyboardType = if (field == IdentifierField.NOTE) KeyboardType.Text else KeyboardType.Ascii, autoCorrect = false),
                 modifier = Modifier.fillMaxWidth(),
             )
-            CharacterReview(editedValue) { editedValue = it }
+            if (field != IdentifierField.NOTE) CharacterReview(editedValue) { editedValue = it }
             Text(tr(TextKey.RAW_RECOGNIZED_TEXT), fontWeight = FontWeight.SemiBold)
             Surface(color = Color(0xFFEAF0F7), shape = RoundedCornerShape(8.dp)) {
                 Text(rawText.ifBlank { tr(TextKey.NO_TEXT_RECOGNIZED) }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
@@ -489,6 +500,8 @@ class ScanActivity : LocalizedActivity() {
     private fun validationError(): String? = when (field) {
         IdentifierField.BOM -> IdentifierRules.validateBom(editedValue)
         IdentifierField.SN -> IdentifierRules.validateSn(editedValue)
+        IdentifierField.PN -> IdentifierRules.validatePn(editedValue)
+        IdentifierField.NOTE -> IdentifierRules.validateScannedNote(editedValue)
     }
 
     private fun rescan() {
