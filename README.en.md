@@ -6,9 +6,9 @@ An offline inventory app for one person using one Android phone. Count parts and
 
 ## Download and install
 
-Requires **Android 8.0 or later**. Current source: **2.4.3** (version code 9).
+Requires **Android 8.0 or later**. Current source: **2.4.4** (version code 10).
 
-[2.4.3 release APK](artifacts/盘库助手-2.4.3.apk) · [Source archive](artifacts/盘库助手-2.4.3-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
+[2.4.4 release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
 
 This release uses the same fixed customer signing key as 2.4.1 and can update it directly. It cannot replace earlier Chinese builds signed with the original key. If you already use an earlier build, export a full JSON backup and copy it elsewhere; **do not uninstall before saving your backup**.
 
@@ -30,6 +30,8 @@ BOMs contain 1–14 letters or digits. PNs allow up to 100 letters/digits with m
 
 ## Import and export
 
+File selection now shows reading progress and brings the preview into view. Documents returned during startup or a backup check wait for that operation instead of being discarded. Local diagnostics retain operation history, errors and UI stalls; developer tools can filter, export and share a diagnostic bundle.
+
 In **Files → Import**, choose an exported **Excel workbook, CSV ZIP, full JSON backup** or standard CSV directly. Chinese and English files work in either interface language. Excel/CSV rows go into the selected warehouse; JSON backups retain their original countries, warehouses, records and history and require confirmation before merging.
 
 The downloadable **UTF-8 CSV** template accepts Chinese, English or mixed headers in this order. English headers and fixed values are case-insensitive.
@@ -48,7 +50,7 @@ Legacy six-column CSVs without PN still work; the new template appends PN as the
 
 Excel reports contain the counting guide, parts detail/summary, machine detail and pending records. CSV ZIP contains three reports and instructions. **Reports can be imported directly.** Only parts, machine and pending detail rows are read; guide and summary sheets are skipped to prevent double counting. Older reports without PN also work. Identifiers, case, leading zeros and multiline notes are retained as stored in the file. Safety apostrophes in report CSVs remain literal; use JSON for a complete migration. JSON backups allow up to 32 MiB and preserve all warehouses, voided records and change history. Identical backup records are skipped; conflicting IDs cancel the merge, and newly imported duplicate machine SNs become voided records.
 
-2.4.3 reads legacy backups. New format-v2 backups preserve PN and require 2.4.2 or a later compatible version to restore. Local backups and recovery points are deleted on uninstall. Recovery points, CSV import history, preferences and scan photos are not included in portable backups.
+2.4.4 reads legacy backups. New format-v2 backups preserve PN and require 2.4.2 or a later compatible version to restore. Local backups and recovery points are deleted on uninstall. Recovery points, CSV import history, preferences and scan photos are not included in portable backups.
 
 ## Development and documentation
 

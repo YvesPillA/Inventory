@@ -19,6 +19,7 @@ import com.fieldstock.app.importdata.ImportRow
 import com.fieldstock.app.importdata.InventoryImport
 import com.fieldstock.app.importdata.InventoryImportContent
 import com.fieldstock.app.importdata.ImportPreview
+import com.fieldstock.app.diagnostics.AppDiagnostics
 import com.fieldstock.app.model.*
 import com.fieldstock.app.i18n.*
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var duplicateOnRestore by mutableStateOf(false)
     var duplicateSummary by mutableStateOf<List<StockRecord>>(emptyList())
     var importRows by mutableStateOf<List<ImportRow>?>(null)
+    var importReading by mutableStateOf(false); private set
+    var importResultVersion by mutableIntStateOf(0); private set
+    private var fileReadGeneration = 0
     var importFileName by mutableStateOf(""); private set
     var importFingerprint by mutableStateOf(""); private set
     var importReceipts by mutableStateOf<List<ImportReceipt>>(emptyList()); private set
@@ -86,11 +90,15 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         preferences.edit().remove("task").putString("warehouse", warehouse).apply()
     }
 
-    fun perform(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, work: (InventoryRepository) -> Unit) {
-        if (busy) return
+    fun perform(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, work: (InventoryRepository) -> Unit) {
+        if (busy && !queueIfBusy) { AppDiagnostics.event("operation.skipped_busy",mapOf("label" to success),"WARN"); return }
+        val operation=java.util.UUID.randomUUID().toString().take(8)
+        AppDiagnostics.event("operation.requested",mapOf("id" to operation,"label" to (recoveryLabel ?: success),"queued" to busy))
         busy = true
         viewModelScope.launch {
           operations.withLock {
+            busy = true
+            val started=android.os.SystemClock.elapsedRealtime()
             try {
                 updateAutomaticStatus(withContext(Dispatchers.IO) { automaticStatus() })
                 val loaded = withContext(Dispatchers.IO) {
@@ -105,24 +113,28 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 select(warehouseId.takeIf { id -> fresh.warehouses.any { it.id == id } } ?: fresh.warehouses.firstOrNull()?.id.orEmpty())
                 if (success.isNotEmpty()) message = success
                 after()
+                AppDiagnostics.event("operation.completed",mapOf("id" to operation,"records" to fresh.records.size,"duration_ms" to (android.os.SystemClock.elapsedRealtime()-started)))
                 if (notify) testFeedback(false)
             } catch (e: DuplicateSnException) {
+                AppDiagnostics.event("operation.duplicate_sn",mapOf("id" to operation),"WARN",e)
                 duplicate = e.existing
                 if (notify) testFeedback(true)
             } catch (e: Exception) {
+                AppDiagnostics.event("operation.failed",mapOf("id" to operation),"ERROR",e)
                 error = e.message ?: tr(TextKey.OPERATION_INCOMPLETE_PLEASE_TRY_AGAIN)
             } finally { busy = false }
           }
         }
     }
 
-    fun performMutation(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, work: (InventoryRepository) -> MutationResult) {
+    fun performMutation(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, work: (InventoryRepository) -> MutationResult) {
         var result = MutationResult(0)
         perform(success, after = {
+            AppDiagnostics.event("mutation.completed",mapOf("processed" to result.processed,"duplicate_machines" to result.duplicateMachines.size))
             duplicateSummary = result.duplicateMachines
             if (notify) testFeedback(result.duplicateMachines.isNotEmpty())
             after()
-        }, recoveryLabel = recoveryLabel) { result = work(it) }
+        }, recoveryLabel = recoveryLabel, queueIfBusy = queueIfBusy) { result = work(it) }
     }
 
     fun setVibration(enabled: Boolean) { vibrationEnabled = enabled; preferences.edit().putBoolean("feedback_vibration", enabled).apply() }
@@ -134,10 +146,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun testFeedback(duplicate: Boolean) = feedback.play(duplicate, vibrationEnabled, soundEnabled)
 
     private fun automaticStatus(force: Boolean = false): AutomaticBackupStatus {
+        AppDiagnostics.event("backup.check",mapOf("force" to force,"enabled" to automaticBackupEnabled))
         val attempt = runCatching {
             if (force) automaticBackups.create(repository.snapshot())
             else if (automaticBackupEnabled) automaticBackups.ensureDaily { repository.snapshot() }
         }
+        attempt.exceptionOrNull()?.let { AppDiagnostics.event("backup.failed",level="ERROR",failure=it) }
         return AutomaticBackupStatus(automaticBackups.entries(), attempt.exceptionOrNull()?.let { tr(TextKey.FULL_BACKUP_INCOMPLETE, it.message ?: tr(TextKey.CHECK_THE_PHONE_S_AVAILABLE_STORAGE)) })
     }
 
@@ -218,7 +232,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun restoreBackup(candidate: InventorySnapshot) {
-        performMutation(tr(TextKey.BACKUP_MERGED), recoveryLabel = tr(TextKey.MERGE_JSON_BACKUP), notify = true) { repository ->
+        AppDiagnostics.event("backup.merge.confirmed",mapOf("records" to candidate.records.size,"warehouses" to candidate.warehouses.size))
+        performMutation(tr(TextKey.BACKUP_MERGED), recoveryLabel = tr(TextKey.MERGE_JSON_BACKUP), notify = true, queueIfBusy = true) { repository ->
             val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
             val count = repository.restore(candidate)
             val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
@@ -233,6 +248,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun prepareExport(kind: String, currentWarehouse: Boolean, automaticId: String? = null, launchPicker: () -> Unit) {
         if (busy) return
         busy = true
+        AppDiagnostics.event("export.prepare",mapOf("kind" to kind,"current_warehouse" to currentWarehouse))
         val current = PendingExport(kind, snapshot, null,
             if (kind != "backup" && currentWarehouse) warehouseId else null)
         viewModelScope.launch {
@@ -249,13 +265,14 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     pendingExport = request
                     launchPicker()
-                } catch (e: Exception) { error = tr(TextKey.COULD_NOT_PREPARE_EXPORT, e.message) }
+                } catch (e: Exception) { AppDiagnostics.event("export.prepare.failed",level="ERROR",failure=e); error = tr(TextKey.COULD_NOT_PREPARE_EXPORT, e.message) }
                 finally { busy = false }
             }
         }
     }
 
     fun export(uri: Uri?) {
+        AppDiagnostics.event("export.picker.result",AppDiagnostics.uriInfo(uri)+mapOf("cancelled" to (uri==null)))
         if (uri == null) { clearPendingExport(); return }
         viewModelScope.launch {
           operations.withLock {
@@ -288,7 +305,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     preferences.edit().putLong("backup_at", lastBackupAt).apply()
                 }
                 message = tr(TextKey.FILE_SAVED_COPY_IT_TO_A_COMPUTER_OR_ANOTHER)
-            } catch (e: Exception) { error = tr(TextKey.FILE_COULD_NOT_BE_SAVED, e.message ?: tr(TextKey.PLEASE_SELECT_ANOTHER_LOCATION)) }
+                AppDiagnostics.event("export.completed",mapOf("kind" to request.kind))
+            } catch (e: Exception) { AppDiagnostics.event("export.failed",level="ERROR",failure=e); error = tr(TextKey.FILE_COULD_NOT_BE_SAVED, e.message ?: tr(TextKey.PLEASE_SELECT_ANOTHER_LOCATION)) }
             finally { clearPendingExport(); busy = false }
           }
         }
@@ -300,43 +318,72 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         exportCache.delete()
     }
 
-    fun previewRestore(uri: Uri?) {
-        if (uri == null || busy) return
-        busy = true
-        viewModelScope.launch {
-            try {
-                restoreCandidate = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.use(InventoryFiles::readBackup)
-                        ?: error(tr(TextKey.COULD_NOT_OPEN_THE_BACKUP_FILE))
-                }
-            } catch (e: Exception) { error = tr(TextKey.COULD_NOT_READ_BACKUP, e.message) }
-            finally { busy = false }
-        }
-    }
+    fun previewRestore(uri: Uri?) = readSelectedDocument(uri, backupOnly = true)
+    fun previewImport(uri: Uri?) = readSelectedDocument(uri, backupOnly = false)
 
-    fun previewImport(uri: Uri?) {
-        if (uri == null || busy) return
-        busy = true
+    private fun readSelectedDocument(uri: Uri?, backupOnly: Boolean) {
+        AppDiagnostics.event("import.picker.result",AppDiagnostics.uriInfo(uri)+mapOf("cancelled" to (uri==null),"busy" to busy,"backup_only" to backupOnly))
+        if (uri == null) return
+        val generation=++fileReadGeneration
+        importReading=true
+        importRows=null; importFileName=""; importFingerprint=""; restoreCandidate=null
+        message=tr(TextKey.READING_IMPORT_FILE)
+        if(busy) AppDiagnostics.event("import.queued",mapOf("request" to generation))
         viewModelScope.launch {
+          operations.withLock {
+            if(generation!=fileReadGeneration) return@withLock
+            busy=true
+            val started=android.os.SystemClock.elapsedRealtime()
+            var consumed=0L
             try {
                 val loaded = withContext(Dispatchers.IO) {
                     val resolver = getApplication<Application>().contentResolver
-                    val name = runCatching { resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    var size:Long?=null
+                    val name = runCatching { resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME,OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                        if (!cursor.moveToFirst()) null else {
+                            val sizeIndex=cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if(sizeIndex>=0 && !cursor.isNull(sizeIndex)) size=cursor.getLong(sizeIndex)
+                            val nameIndex=cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if(nameIndex>=0)cursor.getString(nameIndex) else null
+                        }
                     } }.getOrNull()?.filterNot(Char::isISOControl)?.take(200)?.ifBlank { null } ?: uri.lastPathSegment?.take(200) ?: tr(TextKey.CSV_FILE)
-                    val content = resolver.openInputStream(uri)?.use { InventoryImport.readFile(it, name) } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
+                    AppDiagnostics.event("import.file.open",AppDiagnostics.uriInfo(uri)+mapOf("request" to generation,"name" to name,"size" to size,"mime" to runCatching { resolver.getType(uri) }.getOrNull()))
+                    val content = resolver.openInputStream(uri)?.use { source ->
+                        val counted=object:java.io.FilterInputStream(source) {
+                            override fun read():Int=super.read().also { if(it>=0)consumed++ }
+                            override fun read(b:ByteArray,off:Int,len:Int):Int=super.read(b,off,len).also { if(it>0)consumed+=it }
+                        }
+                        if(backupOnly)InventoryImportContent.Backup(InventoryFiles.readBackup(counted)) else InventoryImport.readFile(counted,name)
+                    } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
                     content to name
                 }
+                if(generation!=fileReadGeneration) return@withLock
                 importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null
                 when (val content = loaded.first) {
                     is InventoryImportContent.Rows -> {
                         importRows = content.rows; importFileName = loaded.second; importFingerprint = InventoryImport.fingerprint(content.rows)
-                        message = tr(TextKey.READ_ROWS_CHOOSE_A_TARGET_WAREHOUSE_AND_CONFIRM_IMPORT, content.rows.size)
+                        message = if(content.rows.isEmpty())tr(TextKey.THE_FILE_CONTAINS_ONLY_A_HEADER_WITH_NO_DATA) else tr(TextKey.READ_ROWS_CHOOSE_A_TARGET_WAREHOUSE_AND_CONFIRM_IMPORT, content.rows.size)
+                        AppDiagnostics.event("import.preview.ready",mapOf("request" to generation,"rows" to content.rows.size,"bytes" to consumed))
                     }
-                    is InventoryImportContent.Backup -> { message = null; restoreCandidate = content.snapshot }
+                    is InventoryImportContent.Backup -> {
+                        message = null; restoreCandidate = content.snapshot
+                        AppDiagnostics.event("import.backup.ready",mapOf("request" to generation,"records" to content.snapshot.records.size,"warehouses" to content.snapshot.warehouses.size,"bytes" to consumed))
+                    }
                 }
-            } catch (e: Exception) { importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null; error = tr(TextKey.COULD_NOT_READ_IMPORT_FILE, e.message) }
-            finally { busy = false }
+                importResultVersion++
+            } catch(e:kotlinx.coroutines.CancellationException) { AppDiagnostics.event("import.cancelled",mapOf("request" to generation),"WARN");throw e }
+            catch (e: Exception) {
+                AppDiagnostics.event("import.file.failed",mapOf("request" to generation,"bytes" to consumed),"ERROR",e)
+                if(generation==fileReadGeneration) {
+                    importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null; message=null
+                    error = tr(TextKey.COULD_NOT_READ_IMPORT_FILE, e.message)
+                }
+            } finally {
+                AppDiagnostics.event("import.read.finished",mapOf("request" to generation,"duration_ms" to (android.os.SystemClock.elapsedRealtime()-started)))
+                if(generation==fileReadGeneration) importReading=false
+                busy = false
+            }
+          }
         }
     }
 
@@ -358,6 +405,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun importPreview(warehouse: String, mode: DuplicateMode) = ImportPreview.calculate(snapshot, importRows.orEmpty(), warehouse, mode)
 
     fun applyImport(warehouse: String, mode: DuplicateMode, allowRepeat: Boolean = false) {
+        AppDiagnostics.event("import.confirmed",mapOf("rows" to importRows?.size,"mode" to mode.name,"allow_repeat" to allowRepeat))
         val rows = importRows ?: return
         if (rows.isEmpty()) { error = tr(TextKey.THE_FILE_CONTAINS_ONLY_A_HEADER_WITH_NO_DATA); return }
         val issue = importPreview(warehouse, mode).issue
@@ -366,7 +414,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         val task = storageTaskId
         val metadata = ImportMetadata(importFingerprint.ifEmpty { InventoryImport.fingerprint(rows) }, importFileName.ifEmpty { tr(TextKey.CSV_FILE) })
         performMutation(tr(TextKey.IMPORT_COMPLETE), after = { importRows = null; importFileName = ""; importFingerprint = "" },
-            recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true) { repository ->
+            recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true, queueIfBusy = true) { repository ->
             repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
                 sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual",
                 pn = row.pn, sourcePn = if (row.pn.isNotEmpty()) "import" else "manual") }, mode, metadata)

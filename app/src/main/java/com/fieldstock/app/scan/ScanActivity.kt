@@ -698,6 +698,7 @@ class ScanActivity : LocalizedActivity() {
 
     private fun recognizeFrame() {
         if (busy || processingFrame || showResult || !cameraReady) return
+        com.fieldstock.app.diagnostics.AppDiagnostics.event("scan.recognition.started",mapOf("field" to field.name))
         val snapshot = previewView?.bitmap
         if (snapshot == null || snapshot.width < 2 || snapshot.height < 2) {
             error = tr(TextKey.CAMERA_PREVIEW_IS_NOT_READY_TRY_RECOGNIZING_AGAIN_SHORTLY)
@@ -750,12 +751,14 @@ class ScanActivity : LocalizedActivity() {
                 }
                 .addOnFailureListener {
                     if (!activityAlive || generation != recognitionGeneration) return@addOnFailureListener
+                    com.fieldstock.app.diagnostics.AppDiagnostics.event("scan.recognition.failed",mapOf("field" to field.name),"ERROR",it)
                     busy = false
                     error = tr(TextKey.RECOGNITION_FAILED_ADJUST_THE_LIGHTING_AND_TRY_AGAIN_OR)
                 }
                 .addOnCompleteListener { processingFrame = false; if (!crop.isRecycled) crop.recycle() }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
             if (!crop.isRecycled) crop.recycle()
+            com.fieldstock.app.diagnostics.AppDiagnostics.event("scan.recognition.failed",mapOf("field" to field.name),"ERROR",failure)
             busy = false
             processingFrame = false
             error = tr(TextKey.RECOGNITION_UNAVAILABLE_TRY_AGAIN_OR_ENTER_IDENTIFIERS_MANUALLY)
@@ -770,6 +773,7 @@ class ScanActivity : LocalizedActivity() {
         reviewPhoto = photo
         rawText = text
         candidates = OcrCandidates.extract(rawText, field)
+        com.fieldstock.app.diagnostics.AppDiagnostics.event("scan.review.ready",mapOf("field" to field.name,"candidates" to candidates.size,"characters" to text.length))
         selectedCandidate = candidates.singleOrNull()
         editedValue = selectedCandidate?.value.orEmpty()
         busy = false

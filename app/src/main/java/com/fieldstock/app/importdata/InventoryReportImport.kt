@@ -1,6 +1,7 @@
 package com.fieldstock.app.importdata
 
 import com.fieldstock.app.i18n.*
+import com.fieldstock.app.diagnostics.AppDiagnostics
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.ByteArrayOutputStream
@@ -109,6 +110,7 @@ internal object InventoryReportImport {
         }
         val strings = sharedStrings(entries["xl/sharedStrings.xml"])
         val selected = sheets.filter { it.first.lowercase(Locale.ROOT) in sheetNames }
+        AppDiagnostics.event("import.xlsx.sheets",mapOf("total" to sheets.size,"detail_sheets" to selected.joinToString { it.first }))
         require(selected.isNotEmpty()) { tr(TextKey.IMPORT_REPORT_SHEETS) }
         require(selected.map { it.first.lowercase(Locale.ROOT) }.distinct().size == selected.size) { tr(TextKey.IMPORT_REPORT_SHEETS) }
         return buildList {
