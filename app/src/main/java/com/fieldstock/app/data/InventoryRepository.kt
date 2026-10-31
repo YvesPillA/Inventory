@@ -22,7 +22,10 @@ import com.fieldstock.app.model.Warehouse
 import com.fieldstock.app.model.ImportMetadata
 import com.fieldstock.app.model.ImportReceipt
 import com.fieldstock.app.model.RecoveryPoint
+import com.fieldstock.app.model.BoundedJson
 import com.fieldstock.app.export.InventoryFiles
+import com.fieldstock.app.backup.BackupMerge
+import com.fieldstock.app.backup.BackupMergeChoices
 import java.io.ByteArrayOutputStream
 import org.json.JSONObject
 import org.json.JSONArray
@@ -41,7 +44,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
 
     @Synchronized
     fun recoveryPoints(): List<RecoveryPoint> = transaction { db ->
-        db.query("recovery_points", arrayOf("id", "label", "at", "record_count", "undone"), null, null, null, null, "at DESC, rowid DESC").use { c ->
+        db.query("recovery_points", arrayOf("id", "label", "at", "record_count", "undone"), null, null, null, null, "rowid DESC").use { c ->
             buildList { while (c.moveToNext()) add(RecoveryPoint(c.string("id"), c.string("label"), c.long("at"), c.int("record_count"), c.int("undone") != 0)) }
         }
     }
@@ -69,7 +72,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
                 put("before_blob", beforeBytes); put("after_blob", afterBytes)
                 put("before_receipts", oldReceipts); put("after_receipts", newReceipts); put("size_bytes", size)
             })
-            val stored = db.query("recovery_points", arrayOf("id", "size_bytes"), null, null, null, null, "at ASC, rowid ASC").use { c ->
+            val stored = db.query("recovery_points", arrayOf("id", "size_bytes"), null, null, null, null, "rowid ASC").use { c ->
                 buildList { while (c.moveToNext()) add(c.string("id") to c.long("size_bytes")) }
             }.toMutableList()
             var total = stored.sumOf { it.second }
@@ -152,7 +155,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             .put("warehouseLabel", v.warehouseLabel).put("at", v.at).put("rows", v.rows))
     } }.toString()
 
-    private fun parseReceipts(text: String): List<ImportReceipt> = JSONArray(text).let { array -> (0 until array.length()).map { i ->
+    private fun parseReceipts(text: String): List<ImportReceipt> = BoundedJson.arrayValue(text).let { array -> (0 until array.length()).map { i ->
         val v = array.getJSONObject(i)
         ImportReceipt(v.getString("id"), v.getString("fingerprint"), v.getString("fileName"), v.getString("warehouseId"), v.getString("warehouseLabel"), v.getLong("at"), v.getInt("rows"))
     } }
@@ -319,7 +322,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     @Synchronized
     fun importRecords(inputs: List<RecordInput>, mode: DuplicateMode, metadata: ImportMetadata? = null): MutationResult = transaction { db ->
         val duplicates = mutableListOf<StockRecord>()
-        inputs.forEach { duplicates += incoming(db, it, mode).duplicateMachines }
+        inputs.forEach { duplicates += incoming(db, it, mode, preserveNote = true).duplicateMachines }
         if (metadata != null) {
             require(inputs.isNotEmpty() && inputs.map { it.warehouseId }.distinct().size == 1) { tr(TextKey.CHOOSE_A_WAREHOUSE_BEFORE_IMPORTING_A_FILE) }
             require(metadata.fingerprint.matches(Regex("[a-f0-9]{64}")) && metadata.fileName.length <= 200) { tr(TextKey.INVALID_IMPORT_FILE_INFORMATION) }
@@ -409,7 +412,11 @@ class InventoryRepository(context: Context) : AutoCloseable {
             val now = maxOf(System.currentTimeMillis(), before.updatedAt)
             val after = moved.copy(voided = before.voided || duplicate, updatedAt = now)
             db.update("records", recordValues(after), "id = ?", arrayOf(before.id))
-            insertChange(db, ChangeLog(newId(), before.id, if (duplicate) "VOID" else "UPDATE", recordJson(before), recordJson(after), now))
+            val audit = BoundedJson.objectValue(recordJson(after)).put("backupImport", JSONObject()
+                .put("source", recordJson(before)).put("destination", JSONObject().put("warehouseId", targetId))).toString()
+            require(audit.length <= 65536) { tr(TextKey.CHANGE_HISTORY_CONTENT_IS_TOO_LONG) }
+            BoundedJson.checkDepth(audit)
+            insertChange(db, ChangeLog(newId(), before.id, if (duplicate) "VOID" else "UPDATE", recordJson(before), audit, now))
             if (duplicate) duplicates += after
         }
         rewriteAuditWarehouses(db, setOf(sourceId), targetId)
@@ -483,7 +490,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
                     val now = maxOf(System.currentTimeMillis(), record.updatedAt)
                     val voided = record.copy(voided = true, updatedAt = now)
                     duplicateAudits += ChangeLog(newId(), record.id, "VOID", recordJson(record),
-                        JSONObject(recordJson(voided)).put("reason", "duplicate_backup_import").toString(), now)
+                        BoundedJson.objectValue(recordJson(voided)).put("reason", "duplicate_backup_import").toString(), now)
                     voided
                 } else { occupied[record.sn] = record; record }
             } else record
@@ -491,9 +498,9 @@ class InventoryRepository(context: Context) : AutoCloseable {
         val records = mergeById(tr(TextKey.INVENTORY_RECORDS), current.records, incomingRecords, StockRecord::id) { existing, incoming ->
             existing == incoming || current.changes.any { log ->
                 log.recordId == incoming.id && log.action == "VOID" && runCatching {
-                    val after = JSONObject(log.after)
+                    val after = BoundedJson.objectValue(log.after)
                     after.optString("reason") == "duplicate_backup_import" &&
-                        recordFromJson(JSONObject(log.before)) == incoming && recordFromJson(after) == existing
+                        recordFromJson(BoundedJson.objectValue(log.before)) == incoming && recordFromJson(after) == existing
                 }.getOrDefault(false)
             }
         }
@@ -550,14 +557,61 @@ class InventoryRepository(context: Context) : AutoCloseable {
         imported.size
     }
 
+    /** Name resolutions, original history, quantity merges and replay markers commit together. */
+    @Synchronized
+    fun importBackup(incoming: InventorySnapshot, choices: BackupMergeChoices = BackupMergeChoices()): MutationResult = transaction { db ->
+        val current = readSnapshot(db)
+        val recordIds = (current.records + incoming.records).mapTo(mutableSetOf()) { it.id }
+        val taskIds = (current.tasks + incoming.tasks).mapTo(mutableSetOf()) { it.id }
+        val warehouseIds = (current.warehouses + incoming.warehouses).mapTo(mutableSetOf()) { it.id }
+        incoming.records.forEach(::validateRecord)
+        incoming.changes.forEach { change ->
+            validateId(change.id)
+            require(change.recordId in recordIds) { tr(TextKey.THE_RECORD_LINKED_TO_CHANGE_HISTORY_DOES_NOT_EXIST) }
+            validateChange(change, taskIds, warehouseIds)
+        }
+        val plan = BackupMerge.prepare(current, incoming, choices)
+        val oldIds = current.records.mapTo(mutableSetOf()) { it.id }
+        val count = restore(plan.snapshot)
+        val added = plan.snapshot.records.filter { it.id !in oldIds }
+        fun partKey(record: StockRecord) = Triple(record.warehouseId, record.bom, record.condition)
+        val targets = current.records.filter { it.kind == ItemKind.PART && !it.voided && it.bom.isNotEmpty() }
+            .sortedWith(compareBy<StockRecord> { it.createdAt }.thenBy { it.id }).groupBy(::partKey)
+            .mapValuesTo(mutableMapOf()) { it.value.first().id }
+        val changingTargets = added.filter { it.kind == ItemKind.PART && !it.voided && it.bom.isNotEmpty() && it.warehouseId in plan.quantityWarehouses }
+            .mapNotNull { targets[partKey(it)] }.toSet()
+        plan.snapshot.records.filter { it.id !in oldIds || it.id in changingTargets }.forEach { source ->
+            plan.sources[source.id]?.let { original ->
+                val stored = findRecord(db, source.id)!!
+                val marker = JSONObject().put("source", recordJson(original))
+                    .put("destination", JSONObject().put("warehouseId", stored.warehouseId))
+                val after = BoundedJson.objectValue(recordJson(stored)).put("backupImport", marker).toString()
+                insertChange(db, ChangeLog(newId(), stored.id, "UPDATE", recordJson(stored), after, maxOf(System.currentTimeMillis(), stored.updatedAt)))
+            }
+        }
+        added.forEach { source ->
+            if (source.kind != ItemKind.PART || source.voided || source.bom.isEmpty()) return@forEach
+            val key = partKey(source)
+            val target = targets[key]?.let { findRecord(db, it) }
+            if (source.warehouseId in plan.quantityWarehouses && target != null) {
+                combineParts(db, target, listOf(findRecord(db, source.id)!!), consumeSources = true)
+            } else if (target == null) targets[key] = source.id
+        }
+        val newMachines = added.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapNotNull { findRecord(db, it.id)?.takeIf { row -> row.voided } }
+        // Validate rewritten history and merged state before the outer transaction can commit.
+        restore(readSnapshot(db))
+        MutationResult(count, newMachines)
+    }
+
     @Synchronized
     override fun close() = helper.close()
 
-    private fun incoming(db: SQLiteDatabase, input: RecordInput, mode: DuplicateMode): MutationResult {
+    private fun incoming(db: SQLiteDatabase, input: RecordInput, mode: DuplicateMode, preserveNote: Boolean = false): MutationResult {
         val now = System.currentTimeMillis()
         var record = StockRecord(newId(), input.taskId, input.warehouseId, input.kind,
             input.bom.trim(), if (input.kind == ItemKind.MACHINE) input.sn.trim() else "",
-            if (input.kind == ItemKind.MACHINE) 1 else input.quantity, input.condition.trim(), input.note.trim(), input.location.trim(),
+            if (input.kind == ItemKind.MACHINE) 1 else input.quantity, input.condition.trim(),
+            if (preserveNote) input.note else input.note.trim(), input.location.trim(),
             input.sourceBom, input.sourceSn, input.rawBom, input.rawSn, now, now, false,
             pn = if (input.kind == ItemKind.MACHINE) input.pn.trim() else "",
             sourcePn = if (input.kind == ItemKind.MACHINE) input.sourcePn else "manual",
@@ -596,10 +650,28 @@ class InventoryRepository(context: Context) : AutoCloseable {
         val after = target.copy(quantity = quantity.toInt(), note = (listOf(target.note).filter { it.isNotEmpty() } + details).joinToString("\n"), updatedAt = now)
         validateRecord(after)
         db.update("records", recordValues(after), "id = ?", arrayOf(target.id))
-        val auditAfter = JSONObject(recordJson(after)).put("mergedSources", JSONArray().apply {
-            sources.forEach { put(JSONObject(recordJson(it))) }
+        val auditAfter = BoundedJson.objectValue(recordJson(after)).put("mergedSources", JSONArray().apply {
+            sources.forEach { source -> put(BoundedJson.objectValue(recordJson(source)).apply {
+                if (consumeSources) {
+                    put("backupImport", JSONObject().put("source", recordJson(source))
+                        .put("destination", JSONObject().put("warehouseId", target.warehouseId)))
+                    val history = JSONArray()
+                    var size = 0L
+                    db.query("changes", null, "record_id = ?", arrayOf(source.id), null, null, "at ASC, id ASC").use { c ->
+                        while (c.moveToNext()) {
+                            val before = c.string("before_json"); val after = c.string("after_json")
+                            size += before.length.toLong() + after.length
+                            require(size <= 65536) { tr(TextKey.TOO_MANY_MERGE_SOURCES_MERGE_IN_SMALLER_BATCHES) }
+                            history.put(JSONObject().put("id", c.string("id")).put("recordId", c.string("record_id"))
+                                .put("action", c.string("action")).put("before", parseAuditJson(before)).put("after", parseAuditJson(after)).put("at", c.long("at")))
+                        }
+                    }
+                    if (history.length() > 0) put("history", history)
+                }
+            }) }
         }).toString()
         require(auditAfter.length <= 65536) { tr(TextKey.TOO_MANY_MERGE_SOURCES_MERGE_IN_SMALLER_BATCHES) }
+        BoundedJson.checkDepth(auditAfter)
         insertChange(db, ChangeLog(newId(), target.id, "UPDATE", recordJson(target), auditAfter, now))
         if (consumeSources) sources.forEach {
             db.delete("changes", "record_id = ?", arrayOf(it.id))
@@ -628,7 +700,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
         }
         changes.forEach { change ->
             val target = replacement ?: records.getValue(change.recordId).warehouseId
-            val before = JSONObject(change.before); val after = JSONObject(change.after)
+            val before = parseAuditJson(change.before); val after = parseAuditJson(change.after)
             rewrite(before, target); rewrite(after, target)
             db.update("changes", ContentValues().apply {
                 put("before_json", before.toString()); put("after_json", after.toString())
@@ -713,6 +785,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
             }
             val record = recordFromJson(json)
             validateRecord(record)
+            BackupMerge.markerSources(json).forEach(::validateRecord)
             require(record.id == change.recordId) { tr(TextKey.CHANGE_HISTORY_RECORD_IDS_DO_NOT_MATCH) }
             require(record.taskId in taskIds && record.warehouseId in warehouseIds) { tr(TextKey.INVALID_CHANGE_HISTORY_REFERENCES) }
         }
@@ -722,7 +795,7 @@ class InventoryRepository(context: Context) : AutoCloseable {
     }
 
     private fun parseAuditJson(value: String): JSONObject = try {
-        JSONObject(value)
+        BoundedJson.objectValue(value)
     } catch (e: Exception) {
         throw IllegalArgumentException(tr(TextKey.INVALID_CHANGE_HISTORY_JSON), e)
     }

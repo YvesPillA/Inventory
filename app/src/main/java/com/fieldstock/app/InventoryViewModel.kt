@@ -13,6 +13,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.core.content.FileProvider
 import com.fieldstock.app.backup.AutomaticBackup
 import com.fieldstock.app.backup.AutomaticBackups
+import com.fieldstock.app.backup.BackupMergeChoices
 import com.fieldstock.app.data.InventoryRepository
 import com.fieldstock.app.export.InventoryFiles
 import com.fieldstock.app.importdata.ImportRow
@@ -23,6 +24,10 @@ import com.fieldstock.app.diagnostics.AppDiagnostics
 import com.fieldstock.app.model.*
 import com.fieldstock.app.i18n.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -41,7 +46,11 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = InventoryRepository(application)
     private val preferences = application.getSharedPreferences("fieldstock", 0)
     private val feedback = StockFeedback(application)
-    private val operations = Mutex()
+    private val operations = inventoryOperations
+    private val lifetimeJob = viewModelScope.coroutineContext[Job]!!
+    private var cleared = false
+    private var pendingOperations = 0
+    private var importCommitPending = false
     private val exportCache = File(application.cacheDir, "pending-export.json")
     private val automaticBackups = AutomaticBackups(File(application.filesDir, "automatic-backups"))
     var snapshot by mutableStateOf(InventorySnapshot()); private set
@@ -62,6 +71,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     var importFingerprint by mutableStateOf(""); private set
     var importReceipts by mutableStateOf<List<ImportReceipt>>(emptyList()); private set
     var recoveryPoints by mutableStateOf<List<RecoveryPoint>>(emptyList()); private set
+    var developerUnlocked by mutableStateOf(false); private set
+    var diagnosticsWorking by mutableStateOf(false); private set
+    var diagnosticsStatus by mutableStateOf(""); private set
+    var diagnosticsResultVersion by mutableIntStateOf(0); private set
     var vibrationEnabled by mutableStateOf(preferences.getBoolean("feedback_vibration", true)); private set
     var soundEnabled by mutableStateOf(preferences.getBoolean("feedback_sound", false)); private set
     var migrationVoidedCount by mutableIntStateOf(0); private set
@@ -90,14 +103,30 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         preferences.edit().remove("task").putString("warehouse", warehouse).apply()
     }
 
-    fun perform(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, work: (InventoryRepository) -> Unit) {
+    /** Reserve synchronously so queued work never briefly enables another confirmation. */
+    private fun launchOperation(finished: () -> Unit = {}, work: suspend () -> Unit) {
+        if (cleared) { finished(); return }
+        pendingOperations++
+        busy = true
+        viewModelScope.launch {
+            try { operations.withLock { work() } }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                AppDiagnostics.event("operation.queue.failed", level = "ERROR", failure = failure)
+                error = failure.message ?: tr(TextKey.OPERATION_INCOMPLETE_PLEASE_TRY_AGAIN)
+            } finally {
+                pendingOperations--
+                busy = pendingOperations > 0
+                finished()
+            }
+        }
+    }
+
+    fun perform(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, finished: () -> Unit = {}, work: (InventoryRepository) -> Unit) {
         if (busy && !queueIfBusy) { AppDiagnostics.event("operation.skipped_busy",mapOf("label" to success),"WARN"); return }
         val operation=java.util.UUID.randomUUID().toString().take(8)
         AppDiagnostics.event("operation.requested",mapOf("id" to operation,"label" to (recoveryLabel ?: success),"queued" to busy))
-        busy = true
-        viewModelScope.launch {
-          operations.withLock {
-            busy = true
+        launchOperation(finished) {
             val started=android.os.SystemClock.elapsedRealtime()
             try {
                 updateAutomaticStatus(withContext(Dispatchers.IO) { automaticStatus() })
@@ -115,6 +144,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 after()
                 AppDiagnostics.event("operation.completed",mapOf("id" to operation,"records" to fresh.records.size,"duration_ms" to (android.os.SystemClock.elapsedRealtime()-started)))
                 if (notify) testFeedback(false)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: DuplicateSnException) {
                 AppDiagnostics.event("operation.duplicate_sn",mapOf("id" to operation),"WARN",e)
                 duplicate = e.existing
@@ -122,19 +153,18 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) {
                 AppDiagnostics.event("operation.failed",mapOf("id" to operation),"ERROR",e)
                 error = e.message ?: tr(TextKey.OPERATION_INCOMPLETE_PLEASE_TRY_AGAIN)
-            } finally { busy = false }
-          }
+            }
         }
     }
 
-    fun performMutation(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, work: (InventoryRepository) -> MutationResult) {
+    fun performMutation(success: String, after: () -> Unit = {}, recoveryLabel: String? = null, notify: Boolean = false, queueIfBusy: Boolean = false, finished: () -> Unit = {}, work: (InventoryRepository) -> MutationResult) {
         var result = MutationResult(0)
         perform(success, after = {
             AppDiagnostics.event("mutation.completed",mapOf("processed" to result.processed,"duplicate_machines" to result.duplicateMachines.size))
             duplicateSummary = result.duplicateMachines
             if (notify) testFeedback(result.duplicateMachines.isNotEmpty())
             after()
-        }, recoveryLabel = recoveryLabel, queueIfBusy = queueIfBusy) { result = work(it) }
+        }, recoveryLabel = recoveryLabel, queueIfBusy = queueIfBusy, finished = finished) { result = work(it) }
     }
 
     fun setVibration(enabled: Boolean) { vibrationEnabled = enabled; preferences.edit().putBoolean("feedback_vibration", enabled).apply() }
@@ -169,35 +199,25 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     /** Checked on startup, returning to the app, and before mutations. No background service needed. */
     fun checkDailyBackup(force: Boolean = false) {
         if (busy) return
-        busy = true
-        viewModelScope.launch {
-            operations.withLock {
-                try {
-                    val status = withContext(Dispatchers.IO) { automaticStatus(force) }
-                    updateAutomaticStatus(status)
-                    if (force && status.warning == null) message = tr(TextKey.FULL_BACKUP_SAVED_ON_THIS_PHONE_SAVE_A_COPY)
-                } finally { busy = false }
-            }
+        launchOperation {
+            val status = withContext(Dispatchers.IO) { automaticStatus(force) }
+            updateAutomaticStatus(status)
+            if (force && status.warning == null) message = tr(TextKey.FULL_BACKUP_SAVED_ON_THIS_PHONE_SAVE_A_COPY)
         }
     }
 
     fun previewAutomaticBackup(id: String) {
         if (busy) return
-        busy = true
-        viewModelScope.launch {
-            operations.withLock {
-                try { restoreCandidate = withContext(Dispatchers.IO) { automaticBackups.read(id) } }
-                catch (failure: Exception) { error = tr(TextKey.COULD_NOT_READ_LOCAL_BACKUP, failure.message) }
-                finally { busy = false }
-            }
+        launchOperation {
+            try { restoreCandidate = withContext(Dispatchers.IO) { automaticBackups.read(id) } }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { error = tr(TextKey.COULD_NOT_READ_LOCAL_BACKUP, failure.message) }
         }
     }
 
     fun shareAutomaticBackup(id: String, ready: (Uri) -> Unit) {
         if (busy) return
-        busy = true
-        viewModelScope.launch {
-            operations.withLock {
+        launchOperation {
                 try {
                     val application = getApplication<Application>()
                     val uri = withContext(Dispatchers.IO) {
@@ -218,9 +238,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                         FileProvider.getUriForFile(application, "${application.packageName}.files", file)
                     }
                     ready(uri)
-                } catch (failure: Exception) { error = tr(TextKey.COULD_NOT_SHARE_BACKUP, failure.message) }
-                finally { busy = false }
-            }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) { error = tr(TextKey.COULD_NOT_SHARE_BACKUP, failure.message) }
         }
     }
 
@@ -231,13 +250,12 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         performMutation(tr(TextKey.RESTORE_COMPLETE), recoveryLabel = tr(TextKey.RESTORE_VOIDED_RECORD, record?.let { warehouseLabel(it.warehouseId) + " / " + it.bom } ?: id), notify = true) { it.restoreVoided(id, mode) }
     }
 
-    fun restoreBackup(candidate: InventorySnapshot) {
-        AppDiagnostics.event("backup.merge.confirmed",mapOf("records" to candidate.records.size,"warehouses" to candidate.warehouses.size))
+    fun restoreBackup(candidate: InventorySnapshot, choices: BackupMergeChoices = BackupMergeChoices()) {
+        AppDiagnostics.event("backup.merge.confirmed",mapOf("records" to candidate.records.size,"warehouses" to candidate.warehouses.size,
+            "country_resolutions" to choices.countries.size,"warehouse_merges" to choices.warehouses.values.count { it.action.name == "MERGE" },
+            "warehouse_renames" to choices.warehouses.values.count { it.action.name == "RENAME" },"parts_mode" to choices.mode.name))
         performMutation(tr(TextKey.BACKUP_MERGED), recoveryLabel = tr(TextKey.MERGE_JSON_BACKUP), notify = true, queueIfBusy = true) { repository ->
-            val beforeIds = repository.snapshot().records.mapTo(mutableSetOf()) { it.id }
-            val count = repository.restore(candidate)
-            val expectedActive = candidate.records.filter { !it.voided && it.kind == ItemKind.MACHINE }.mapTo(mutableSetOf()) { it.id }
-            MutationResult(count, repository.snapshot().records.filter { it.id !in beforeIds && it.id in expectedActive && it.voided })
+            repository.importBackup(candidate, choices)
         }
     }
 
@@ -245,14 +263,49 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         perform("", after = { migrationVoidedCount = 0 }) { it.acknowledgeMigrationNotice() }
     }
 
+    internal fun openDeveloperSession() {
+        developerUnlocked = true
+        diagnosticsStatus = ""
+        AppDiagnostics.event("developer.unlocked")
+    }
+
+    internal fun closeDeveloperSession() {
+        developerUnlocked = false
+        AppDiagnostics.event("developer.closed")
+    }
+
+    /** The result handler outlives the console and waits for initialization after recreation. */
+    fun exportDiagnostics(uri: Uri?) {
+        if (uri == null) { AppDiagnostics.event("diagnostics.save.cancelled"); return }
+        if (diagnosticsWorking) return
+        diagnosticsWorking = true
+        diagnosticsStatus = ""
+        launchOperation(finished = { diagnosticsWorking = false }) {
+            try {
+                val application = getApplication<Application>()
+                val current = snapshot
+                withContext(Dispatchers.IO) {
+                    application.contentResolver.openOutputStream(uri, "wt")?.use { AppDiagnostics.writeBundle(application, current, it) }
+                        ?: error(tr(TextKey.COULD_NOT_OPEN_THE_SAVE_LOCATION_PLEASE_SELECT_ANOTHER))
+                }
+                diagnosticsStatus = tr(TextKey.DIAGNOSTIC_SAVED)
+                message = diagnosticsStatus
+                diagnosticsResultVersion++
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                AppDiagnostics.event("diagnostics.failed", level = "ERROR", failure = failure)
+                diagnosticsStatus = tr(TextKey.DIAGNOSTIC_FAILED, failure.message ?: failure.javaClass.simpleName)
+                error = diagnosticsStatus
+            }
+        }
+    }
+
     fun prepareExport(kind: String, currentWarehouse: Boolean, automaticId: String? = null, launchPicker: () -> Unit) {
         if (busy) return
-        busy = true
         AppDiagnostics.event("export.prepare",mapOf("kind" to kind,"current_warehouse" to currentWarehouse))
         val current = PendingExport(kind, snapshot, null,
             if (kind != "backup" && currentWarehouse) warehouseId else null)
-        viewModelScope.launch {
-            operations.withLock {
+        launchOperation {
                 try {
                     val request = withContext(Dispatchers.IO) {
                         val request = if (automaticId == null) current
@@ -265,18 +318,15 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     pendingExport = request
                     launchPicker()
-                } catch (e: Exception) { AppDiagnostics.event("export.prepare.failed",level="ERROR",failure=e); error = tr(TextKey.COULD_NOT_PREPARE_EXPORT, e.message) }
-                finally { busy = false }
-            }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (e: Exception) { AppDiagnostics.event("export.prepare.failed",level="ERROR",failure=e); error = tr(TextKey.COULD_NOT_PREPARE_EXPORT, e.message) }
         }
     }
 
     fun export(uri: Uri?) {
         AppDiagnostics.event("export.picker.result",AppDiagnostics.uriInfo(uri)+mapOf("cancelled" to (uri==null)))
         if (uri == null) { clearPendingExport(); return }
-        viewModelScope.launch {
-          operations.withLock {
-            busy = true
+        launchOperation {
             try {
                 val request = pendingExport ?: withContext(Dispatchers.IO) {
                     val kind = preferences.getString("pending_kind", null) ?: error(tr(TextKey.THE_EXPORT_REQUEST_HAS_EXPIRED_PLEASE_EXPORT_AGAIN))
@@ -306,9 +356,9 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 message = tr(TextKey.FILE_SAVED_COPY_IT_TO_A_COMPUTER_OR_ANOTHER)
                 AppDiagnostics.event("export.completed",mapOf("kind" to request.kind))
-            } catch (e: Exception) { AppDiagnostics.event("export.failed",level="ERROR",failure=e); error = tr(TextKey.FILE_COULD_NOT_BE_SAVED, e.message ?: tr(TextKey.PLEASE_SELECT_ANOTHER_LOCATION)) }
-            finally { clearPendingExport(); busy = false }
-          }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (e: Exception) { AppDiagnostics.event("export.failed",level="ERROR",failure=e); error = tr(TextKey.FILE_COULD_NOT_BE_SAVED, e.message ?: tr(TextKey.PLEASE_SELECT_ANOTHER_LOCATION)) }
+            finally { clearPendingExport() }
         }
     }
 
@@ -329,10 +379,8 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         importRows=null; importFileName=""; importFingerprint=""; restoreCandidate=null
         message=tr(TextKey.READING_IMPORT_FILE)
         if(busy) AppDiagnostics.event("import.queued",mapOf("request" to generation))
-        viewModelScope.launch {
-          operations.withLock {
-            if(generation!=fileReadGeneration) return@withLock
-            busy=true
+        launchOperation {
+            if(generation!=fileReadGeneration) return@launchOperation
             val started=android.os.SystemClock.elapsedRealtime()
             var consumed=0L
             try {
@@ -357,7 +405,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
                     } ?: error(tr(TextKey.COULD_NOT_OPEN_THE_IMPORT_FILE))
                     content to name
                 }
-                if(generation!=fileReadGeneration) return@withLock
+                if(generation!=fileReadGeneration) return@launchOperation
                 importRows = null; importFileName = ""; importFingerprint = ""; restoreCandidate = null
                 when (val content = loaded.first) {
                     is InventoryImportContent.Rows -> {
@@ -381,9 +429,7 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
             } finally {
                 AppDiagnostics.event("import.read.finished",mapOf("request" to generation,"duration_ms" to (android.os.SystemClock.elapsedRealtime()-started)))
                 if(generation==fileReadGeneration) importReading=false
-                busy = false
             }
-          }
         }
     }
 
@@ -405,6 +451,10 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
     fun importPreview(warehouse: String, mode: DuplicateMode) = ImportPreview.calculate(snapshot, importRows.orEmpty(), warehouse, mode)
 
     fun applyImport(warehouse: String, mode: DuplicateMode, allowRepeat: Boolean = false) {
+        if (importCommitPending) {
+            AppDiagnostics.event("import.confirmation.already_pending", level = "WARN")
+            return
+        }
         AppDiagnostics.event("import.confirmed",mapOf("rows" to importRows?.size,"mode" to mode.name,"allow_repeat" to allowRepeat))
         val rows = importRows ?: return
         if (rows.isEmpty()) { error = tr(TextKey.THE_FILE_CONTAINS_ONLY_A_HEADER_WITH_NO_DATA); return }
@@ -413,8 +463,13 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         if (!allowRepeat && repeatImportNotice(warehouse).isNotEmpty()) { error = tr(TextKey.THIS_FILE_CONTENT_WAS_IMPORTED_BEFORE_PREVIEW_IT_AND); return }
         val task = storageTaskId
         val metadata = ImportMetadata(importFingerprint.ifEmpty { InventoryImport.fingerprint(rows) }, importFileName.ifEmpty { tr(TextKey.CSV_FILE) })
+        importCommitPending = true
         performMutation(tr(TextKey.IMPORT_COMPLETE), after = { importRows = null; importFileName = ""; importFingerprint = "" },
-            recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true, queueIfBusy = true) { repository ->
+            recoveryLabel = tr(TextKey.IMPORT_2, metadata.fileName, warehouseLabel(warehouse)).take(512), notify = true, queueIfBusy = true,
+            finished = { importCommitPending = false }) { repository ->
+            require(allowRepeat || repository.importReceipts().none { it.fingerprint == metadata.fingerprint }) {
+                tr(TextKey.THIS_FILE_CONTENT_WAS_IMPORTED_BEFORE_PREVIEW_IT_AND)
+            }
             repository.importRecords(rows.map { row -> RecordInput(task, warehouse, row.kind, row.bom, row.sn, row.quantity, row.condition, row.note,
                 sourceBom = "import", sourceSn = if (row.kind == ItemKind.MACHINE) "import" else "manual",
                 pn = row.pn, sourcePn = if (row.pn.isNotEmpty()) "import" else "manual") }, mode, metadata)
@@ -434,9 +489,21 @@ class InventoryViewModel(application: Application) : AndroidViewModel(applicatio
         return "${snapshot.countries.find { it.id == warehouse.countryId }?.name.orEmpty()} / ${warehouse.name}"
     }
 
-    override fun onCleared() { feedback.close(); repository.close(); super.onCleared() }
+    override fun onCleared() {
+        cleared = true
+        lifetimeJob.cancel()
+        feedback.close()
+        if (lifetimeJob.isCompleted) repository.close()
+        else repositoryCleanup.launch {
+            lifetimeJob.join()
+            runCatching { repository.close() }.onFailure { AppDiagnostics.event("repository.close.failed", level = "ERROR", failure = it) }
+        }
+        super.onCleared()
+    }
 
     companion object {
+        private val inventoryOperations = Mutex()
+        private val repositoryCleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         fun formatTime(at: Long): String = DateTimeFormatter.ofPattern("MM-dd HH:mm").format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
         fun formatHistoryTime(at: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
     }

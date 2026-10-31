@@ -18,9 +18,13 @@ data class ImportPreview(
             val current = active.filter { it.warehouseId == warehouse }
             val serials = active.filter { it.kind == ItemKind.MACHINE && it.sn.isNotEmpty() }.mapTo(mutableSetOf()) { it.sn }
             val quantities = linkedMapOf<Pair<String, String>, Long>()
+            val noteLengths = linkedMapOf<Pair<String, String>, Int>()
             current.filter { it.kind == ItemKind.PART && it.bom.isNotEmpty() }
                 .sortedWith(compareBy<StockRecord> { it.createdAt }.thenBy { it.id })
-                .forEach { quantities.putIfAbsent(it.bom to it.condition, it.quantity.toLong()) }
+                .forEach {
+                    quantities.putIfAbsent(it.bom to it.condition, it.quantity.toLong())
+                    noteLengths.putIfAbsent(it.bom to it.condition, it.note.length)
+                }
             var parts = 0L; var machines = 0; var duplicates = 0; var merged = 0; var entries = 0
             var issue: String? = if (snapshot.warehouses.none { it.id == warehouse }) tr(TextKey.CHOOSE_A_VALID_IMPORT_WAREHOUSE) else null
             rows.forEach { row ->
@@ -29,10 +33,19 @@ data class ImportPreview(
                     val key = row.bom to row.condition
                     if (mode == DuplicateMode.ADD_QUANTITY && row.bom.isNotEmpty()) {
                         val old = quantities[key]
-                        if (old == null) { quantities[key] = row.quantity.toLong(); entries++ }
+                        if (old == null) { quantities[key] = row.quantity.toLong(); noteLengths[key] = row.note.trim().length; entries++ }
                         else {
                             merged++; quantities[key] = old + row.quantity
-                            if (old + row.quantity > 1_000_000_000L) issue = tr(TextKey.BOM_EXCEEDS_THE_QUANTITY_LIMIT_AFTER_MERGING_CHOOSE_NEW, row.bom, conditionLabel(row.condition))
+                            val note = row.note.trim()
+                            if (note.isNotEmpty()) {
+                                val before = noteLengths[key] ?: 0
+                                val detail = tr(TextKey.MERGED_SOURCE_PCS, row.quantity).length + 1 + note.length
+                                // Once invalid, retain only the length sentinel instead of building
+                                // an ever-growing note on the UI thread for a large duplicate batch.
+                                noteLengths[key] = minOf(4001, before + (if (before > 0) 1 else 0) + detail)
+                            }
+                            if (old + row.quantity > 1_000_000_000L) issue = issue ?: tr(TextKey.BOM_EXCEEDS_THE_QUANTITY_LIMIT_AFTER_MERGING_CHOOSE_NEW, row.bom, conditionLabel(row.condition))
+                            if ((noteLengths[key] ?: 0) > 4000) issue = issue ?: tr(TextKey.BOM_EXCEEDS_NOTE_LIMIT_AFTER_MERGING_CHOOSE_NEW, row.bom, conditionLabel(row.condition))
                         }
                     } else entries++
                 } else {

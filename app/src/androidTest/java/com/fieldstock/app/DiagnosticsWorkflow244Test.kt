@@ -109,7 +109,7 @@ class DiagnosticsWorkflow244Test {
         InventoryRepository(context).use{repo->repo.save(RecordInput(repo.snapshot().tasks.first().id,warehouse,ItemKind.PART,"ABC","",7,StockCondition.NORMAL,"PRIVATE_STOCK_NOTE_244"))}
         launch()
         AppDiagnostics.event("test.error.244",failure=IllegalStateException("outer diagnostic",IllegalArgumentException("inner diagnostic")),level="ERROR")
-        scenario!!.onActivity{activity->activity.setContent{MaterialTheme{DeveloperConsole(vm){}}}}
+        scenario!!.onActivity{activity->activity.setContent{MaterialTheme{DiagnosticExportHost(vm){DeveloperConsole(vm){}}}}}
         waitFor(t(TextKey.DIAGNOSTIC_EXPORT));click(TextKey.DIAGNOSTIC_ERRORS)
         compose.waitUntil(20_000){compose.onAllNodesWithText("inner diagnostic",substring=true).fetchSemanticsNodes().isNotEmpty()}
         val file=shared("diagnostics-test.zip")
