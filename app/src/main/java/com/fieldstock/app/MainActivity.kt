@@ -72,7 +72,7 @@ class MainActivity : LocalizedActivity() {
                 if (LanguageSettings.selected(this) == null) FirstLanguageChooser { language ->
                     LanguageSettings.select(this, language)
                     recreate()
-                } else FieldStockApp()
+                } else DiagnosticExportHost { FieldStockApp() }
             }
         }
     }

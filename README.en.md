@@ -6,7 +6,7 @@ An offline inventory app for one person using one Android phone. Count parts and
 
 ## Download and install
 
-Requires **Android 8.0 or later**. Current release: **2.4.4 hotfix** (version code 10, unchanged).
+Requires **Android 8.0 or later**. Current release: **2.4.4 hotfix** (version code 10, unchanged), including audit fixes for stock merges, file round trips, scanning and diagnostics.
 
 [2.4.4 release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
 
@@ -34,7 +34,7 @@ File selection now shows reading progress and brings the preview into view. Docu
 
 In **Files → Import**, choose an exported **Excel workbook, CSV ZIP, full JSON backup** or standard CSV directly. Chinese and English files work in either interface language. Excel/CSV rows go into the selected warehouse; JSON backups retain their original countries, warehouses, records and history and require confirmation before merging.
 
-For a country name conflict, add the backup warehouses to the existing country. For a warehouse name conflict, merge it or rename it before adding. Matching parts with the same BOM and condition can become separate entries or add to the existing quantity. Reimporting the same backup does not add its quantities again. Source history is retained and the import can be undone through local recovery points. This hotfix also fixes a focus crash when opening **More** on the counting screen.
+For a country name conflict, add the backup warehouses to the existing country. For a warehouse name conflict, merge it or rename it before adding. Matching parts with the same BOM and condition can become separate entries or add to the existing quantity. Reimporting the same backup does not add its quantities again, including after later merges or migration. Processed source identities and history are retained. Renamed locations can reuse the existing location after confirmation, and important operations can be undone through local recovery points.
 
 The downloadable **UTF-8 CSV** template accepts Chinese, English or mixed headers in this order. English headers and fixed values are case-insensitive.
 
@@ -50,7 +50,9 @@ The downloadable **UTF-8 CSV** template accepts Chinese, English or mixed header
 
 Legacy six-column CSVs without PN still work; the new template appends PN as the seventh column. Format BOM, PN and SN columns as text before entering values in Excel, then save as CSV UTF-8. Limits: 8 MiB and 10,000 rows. Invalid files report a row number and cancel the entire batch. CSV adds inventory; accepting a repeated import adds it again.
 
-Excel reports contain the counting guide, parts detail/summary, machine detail and pending records. CSV ZIP contains three reports and instructions. **Reports can be imported directly.** Only parts, machine and pending detail rows are read; guide and summary sheets are skipped to prevent double counting. Older reports without PN also work. Identifiers, case, leading zeros and multiline notes are retained as stored in the file. Safety apostrophes in report CSVs remain literal; use JSON for a complete migration. JSON backups allow up to 32 MiB and preserve all warehouses, voided records and change history. Identical backup records are skipped; conflicting IDs cancel the merge, and newly imported duplicate machine SNs become voided records.
+Excel reports contain the counting guide, parts detail/summary, machine detail and pending records. CSV ZIP contains three reports and instructions. **Reports can be imported directly.** Only detail rows are read; guide and summary sheets are skipped. Repeated report record IDs cancel the batch. Older reports without PN also work. Identifier case, leading zeros, and note spaces and line breaks are retained.
+
+New report CSVs include a **Note escaped / 备注转义** flag so reimport can restore the original note after spreadsheet formula protection. Older CSVs without this flag retain their literal text. The standard import template is unchanged. Use JSON for a complete migration: up to 32 MiB, including all warehouses, voided records and history. Previously processed sources are skipped; unmatched conflicting IDs cancel the merge, and newly imported duplicate machine SNs become voided records.
 
 2.4.4 reads legacy backups. New format-v2 backups preserve PN and require 2.4.2 or a later compatible version to restore. Local backups and recovery points are deleted on uninstall. Recovery points, CSV import history, preferences and scan photos are not included in portable backups.
 

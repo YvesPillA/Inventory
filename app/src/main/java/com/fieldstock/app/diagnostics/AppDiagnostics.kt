@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 object AppDiagnostics {
-    const val BUILD_REVISION = "2.4.4-hotfix-20261030"
+    const val BUILD_REVISION = "2.4.4-hotfix-audit-20261030"
     @Volatile private var store: DiagnosticStore? = null
     @Volatile var lastFailure: String? = null; private set
     private val writer = ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,ArrayBlockingQueue(512),

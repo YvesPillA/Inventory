@@ -2,6 +2,7 @@ package com.fieldstock.app.importdata
 
 import com.fieldstock.app.i18n.*
 import com.fieldstock.app.diagnostics.AppDiagnostics
+import com.fieldstock.app.export.InventoryFiles
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.ByteArrayOutputStream
@@ -13,7 +14,21 @@ internal data class ReportColumns(val indexes: Map<String, Int>) {
     fun standardFields(values: List<String>): List<String> {
         fun get(key: String) = indexes[key]?.let { values.getOrElse(it) { "" } }.orEmpty()
         val kind = if ("type" in indexes) get("type") else if ("sn" in indexes) "Machine" else "Part"
-        return listOf(kind, get("bom"), get("sn"), get("quantity"), get("condition"), get("note"), get("pn"))
+        var note = get("note")
+        if ("noteescaped" in indexes) {
+            val flag = get("noteescaped")
+            require(flag == "0" || flag == "1") { tr(TextKey.IMPORT_NOTE_ESCAPE_INVALID) }
+            if (flag == "1") {
+                require(note.startsWith("'") && InventoryFiles.requiresCsvProtection(note.substring(1))) { tr(TextKey.IMPORT_NOTE_ESCAPE_INVALID) }
+                note = note.substring(1)
+            }
+        }
+        return listOf(kind, get("bom"), get("sn"), get("quantity"), get("condition"), note, get("pn"))
+    }
+    fun checkRecordId(values: List<String>, seen: MutableSet<String>, invalid: (String) -> Nothing) {
+        val id = indexes["id"]?.let { values.getOrElse(it) { "" } }.orEmpty()
+        if (id.length > 128) invalid(tr(TextKey.INVALID_DATA_ID))
+        if (id.isNotEmpty() && !seen.add(id)) invalid(tr(TextKey.IMPORT_DUPLICATE_REPORT_ID, id))
     }
 }
 
@@ -23,11 +38,14 @@ internal object InventoryReportImport {
     private const val MAX_ENTRIES = 256
     private const val MAX_COLUMNS = 64
     private const val MAX_TEXT = 4000
+    // SpreadsheetML represents a character as _xNNNN_; enforce the user limit after decoding.
+    private const val MAX_ENCODED_TEXT = MAX_TEXT * 7
     private val aliases = mapOf(
         "国家" to "country", "country" to "country", "仓库" to "warehouse", "warehouse" to "warehouse",
         "类型" to "type", "type" to "type", "bom" to "bom", "sn" to "sn", "pn" to "pn",
         "数量" to "quantity", "quantity" to "quantity", "状态" to "condition", "condition" to "condition",
-        "备注" to "note", "note" to "note", "记录id" to "id", "record id" to "id"
+        "备注" to "note", "note" to "note", "记录id" to "id", "record id" to "id",
+        "备注转义" to "noteescaped", "note escaped" to "noteescaped"
     )
     private val sheetNames = listOf(TextKey.PARTS_DETAIL, TextKey.MACHINE_DETAIL).flatMap { key ->
         AppLanguage.entries.map { it.text(key).lowercase(Locale.ROOT) }
@@ -50,9 +68,10 @@ internal object InventoryReportImport {
             return if ("xl/workbook.xml" in entries) readWorkbook(entries) else {
                 val files = entries.filterKeys { it.lowercase(Locale.ROOT) in csvNames }
                 require(files.isNotEmpty()) { tr(TextKey.IMPORT_SUPPORTED_FILES) }
+                val seenIds = mutableSetOf<String>()
                 buildList {
                     files.forEach { (name, data) ->
-                        val rows = inSheet(name) { InventoryImport.readCsv(data, name) }
+                        val rows = inSheet(name) { InventoryImport.readCsv(data, name, seenIds) }
                         checkRows(size + rows.size)
                         addAll(rows)
                     }
@@ -113,10 +132,11 @@ internal object InventoryReportImport {
         AppDiagnostics.event("import.xlsx.sheets",mapOf("total" to sheets.size,"detail_sheets" to selected.joinToString { it.first }))
         require(selected.isNotEmpty()) { tr(TextKey.IMPORT_REPORT_SHEETS) }
         require(selected.map { it.first.lowercase(Locale.ROOT) }.distinct().size == selected.size) { tr(TextKey.IMPORT_REPORT_SHEETS) }
+        val seenIds = mutableSetOf<String>()
         return buildList {
             selected.forEach { (name, id) ->
                 val data = targets[id]?.let(entries::get) ?: invalid(tr(TextKey.IMPORT_ARCHIVE_INVALID))
-                inSheet(name) { readSheet(data, strings) { row -> checkRows(size + 1); add(row) } }
+                inSheet(name) { readSheet(data, strings, seenIds) { row -> checkRows(size + 1); add(row) } }
             }
         }
     }
@@ -144,7 +164,7 @@ internal object InventoryReportImport {
         return result
     }
 
-    private fun readSheet(data: ByteArray, strings: List<String>, consume: (ImportRow) -> Unit) {
+    private fun readSheet(data: ByteArray, strings: List<String>, seenIds: MutableSet<String>, consume: (ImportRow) -> Unit) {
         var headers: List<String>? = null
         var mapping: ReportColumns? = null
         var values = mutableListOf<String>()
@@ -180,12 +200,18 @@ internal object InventoryReportImport {
                         "inlineStr", "str" -> unescape(raw)
                         null, "n" -> {
                             if (column == mapping?.indexes?.get("quantity") && raw.isNotEmpty()) {
-                                try { BigDecimal(raw).toBigIntegerExact().toString() }
+                                try {
+                                    val number = BigDecimal(raw)
+                                    // Never expand an untrusted exponent before checking the allowed range.
+                                    if (number >= BigDecimal.ONE && number <= BigDecimal("1000000000")) number.toBigIntegerExact().toString() else raw
+                                }
                                 catch (_: ArithmeticException) { raw }
+                                catch (_: NumberFormatException) { raw }
                             } else raw
                         }
                         else -> invalid(tr(TextKey.IMPORT_CELL_INVALID, row))
                     }
+                    require(cell.length <= MAX_TEXT) { tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS) }
                     while (values.size <= column) values += ""
                     values[column] = cell
                 }
@@ -195,6 +221,7 @@ internal object InventoryReportImport {
                         mapping = columns(values) ?: invalid(tr(TextKey.IMPORT_REPORT_HEADERS))
                     } else {
                         require(values != headers) { tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW) }
+                        mapping!!.checkRecordId(values, seenIds) { message -> invalid(tr(TextKey.LINE, row, message)) }
                         consume(InventoryImport.validate(mapping!!.standardFields(values), row))
                     }
                 }
@@ -215,10 +242,12 @@ internal object InventoryReportImport {
 
     private fun append(value: StringBuilder?, text: String) {
         if (value == null) return
-        require(value.length + text.length <= MAX_TEXT) { tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS) }
+        require(value.length + text.length <= MAX_ENCODED_TEXT) { tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS) }
         value.append(text)
     }
-    private fun unescape(value: String) = Regex("_x([0-9a-fA-F]{4})_").replace(value) { it.groupValues[1].toInt(16).toChar().toString() }
+    private fun unescape(value: String): String = Regex("_x([0-9a-fA-F]{4})_").replace(value) { it.groupValues[1].toInt(16).toChar().toString() }.also {
+        require(it.length <= MAX_TEXT) { tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS) }
+    }
     private fun checkRows(count: Int) { require(count <= InventoryImport.MAX_ROWS) { tr(TextKey.DATA_MUST_NOT_EXCEED_10000_ROWS_IMPORT_IN_SMALLER) } }
     private fun invalid(message: String): Nothing = throw IllegalArgumentException(message)
     private inline fun <T> inSheet(name: String, operation: () -> T): T = try { operation() }

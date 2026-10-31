@@ -2,6 +2,11 @@ package com.fieldstock.app.i18n
 
 /** Typed bilingual messages shared by UI, validation and file writers; no Android dependency. */
 enum class TextKey(val chinese: String, val english: String) {
+    IMPORT_NOTE_ESCAPE_INVALID("备注转义标记必须为0或1，标记为1时备注须带有效的安全前缀。", "Note escape flag must be 0 or 1. A flag of 1 requires a valid safety prefix."),
+    BACKUP_LOCATION_RENAMED("备份名称：{0}；现有名称：{1}。使用现有位置并保留现有名称。", "Backup name: {0}; current name: {1}. Use the existing location and keep its current name."),
+    CSV_NOTE_ESCAPED("备注转义", "Note escaped"),
+    IMPORT_DUPLICATE_REPORT_ID("报表记录 ID 重复：{0}。同一条明细请只保留一份。", "Repeated report record ID: {0}. Include each detail record only once."),
+    BOM_EXCEEDS_NOTE_LIMIT_AFTER_MERGING_CHOOSE_NEW("BOM {0}（{1}）合并后备注超过4000字，请选择新增条目。", "BOM {0} ({1}) would exceed the 4000-character note limit after merging. Choose new entries."),
     BACKUP_CHOOSE_COUNTRY("请选择将备份仓库加入现有国家：{0}", "Choose to add the backup warehouses to the existing country: {0}"),
     BACKUP_USE_COUNTRY("将仓库加入现有国家「{0}」", "Add warehouses to existing country “{0}”"),
     BACKUP_CHOOSE_WAREHOUSE("请选择同名仓库「{0}」的处理方式", "Choose how to handle the existing warehouse “{0}”"),

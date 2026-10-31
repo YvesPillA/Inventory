@@ -637,6 +637,9 @@ class ScanActivity : LocalizedActivity() {
         Bitmap.createBitmap(scene, left, top, right - left, bottom - top)
     }.getOrNull()
 
+    /** Single captures must read exactly the region shown for the requested field. */
+    internal fun cropRecognitionFrame(scene: Bitmap): Bitmap? = cropFrame(scene, currentRoi)
+
     private fun bindCamera(view: PreviewView) {
         val generation = ++cameraGeneration
         cameraReady = false
@@ -701,16 +704,12 @@ class ScanActivity : LocalizedActivity() {
         com.fieldstock.app.diagnostics.AppDiagnostics.event("scan.recognition.started",mapOf("field" to field.name))
         val snapshot = previewView?.bitmap
         if (snapshot == null || snapshot.width < 2 || snapshot.height < 2) {
+            snapshot?.recycle()
             error = tr(TextKey.CAMERA_PREVIEW_IS_NOT_READY_TRY_RECOGNIZING_AGAIN_SHORTLY)
             return
         }
-        val crop = try {
-            val left = (snapshot.width * SINGLE_ROI.left).roundToInt().coerceIn(0, snapshot.width - 1)
-            val top = (snapshot.height * SINGLE_ROI.top).roundToInt().coerceIn(0, snapshot.height - 1)
-            val right = (snapshot.width * SINGLE_ROI.right).roundToInt().coerceIn(left + 1, snapshot.width)
-            val bottom = (snapshot.height * SINGLE_ROI.bottom).roundToInt().coerceIn(top + 1, snapshot.height)
-            Bitmap.createBitmap(snapshot, left, top, right - left, bottom - top)
-        } catch (_: Exception) {
+        val crop = cropRecognitionFrame(snapshot)
+        if (crop == null) {
             snapshot.recycle()
             error = tr(TextKey.COULD_NOT_READ_THE_CAMERA_PREVIEW_SCAN_AGAIN)
             return

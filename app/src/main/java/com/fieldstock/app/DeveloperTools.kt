@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fieldstock.app.diagnostics.AppDiagnostics
 import com.fieldstock.app.diagnostics.DeveloperGate
 import com.fieldstock.app.i18n.*
@@ -39,10 +40,17 @@ import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+private val LocalDiagnosticExport = staticCompositionLocalOf<(String) -> Unit> { { error("Missing diagnostics export host") } }
+
+/** Register once at the activity root, including while the developer console is closed. */
+@Composable internal fun DiagnosticExportHost(vm: InventoryViewModel = viewModel(), content: @Composable () -> Unit) {
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip"), vm::exportDiagnostics)
+    CompositionLocalProvider(LocalDiagnosticExport provides { name -> launcher.launch(name) }, content = content)
+}
+
 @Composable internal fun DeveloperEntry(vm: InventoryViewModel) {
     val gate=remember { DeveloperGate(BuildConfig.DEVELOPER_KEY_SHA256) }
     var prompt by remember { mutableStateOf(false) }
-    var opened by remember { mutableStateOf(false) }
     var key by remember { mutableStateOf("") }
     var incorrect by remember { mutableStateOf(false) }
     val interaction=remember { MutableInteractionSource() }
@@ -51,7 +59,7 @@ import java.time.format.DateTimeFormatter
             if(gate.tap()){ key="";incorrect=false;prompt=true;AppDiagnostics.event("developer.key.requested") }
         })
     fun submit() {
-        if(gate.accepts(key)){ key="";prompt=false;opened=true;AppDiagnostics.event("developer.unlocked") }
+        if(gate.accepts(key)){ key="";prompt=false;vm.openDeveloperSession() }
         else { incorrect=true;AppDiagnostics.event("developer.unlock.rejected",level="WARN") }
     }
     if(prompt) AlertDialog(onDismissRequest={prompt=false;key=""},title={Text(tr(TextKey.DEVELOPER_KEY))},text={
@@ -64,7 +72,7 @@ import java.time.format.DateTimeFormatter
         }
     },confirmButton={TextButton(onClick={submit()},enabled=key.isNotEmpty()){Text(tr(TextKey.DEVELOPER_ENTER))}},
         dismissButton={TextButton(onClick={prompt=false;key=""}){Text(tr(TextKey.CANCEL))}})
-    if(opened) DeveloperConsole(vm) { opened=false;AppDiagnostics.event("developer.closed") }
+    if(vm.developerUnlocked) DeveloperConsole(vm, vm::closeDeveloperSession)
 }
 
 @Composable internal fun DeveloperConsole(vm: InventoryViewModel, onDismiss: () -> Unit) {
@@ -76,22 +84,13 @@ import java.time.format.DateTimeFormatter
     var entries by remember { mutableStateOf<List<String>>(emptyList()) }
     var environment by remember { mutableStateOf("") }
     var device by remember { mutableStateOf(false) }
-    var working by remember { mutableStateOf(false) }
+    var localWorking by remember { mutableStateOf(false) }
+    val working = localWorking || vm.diagnosticsWorking
     var status by remember { mutableStateOf("") }
     var clear by remember { mutableStateOf(false) }
     fun failed(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;status=tr(TextKey.DIAGNOSTIC_FAILED,e.message ?: e.javaClass.simpleName);AppDiagnostics.event("diagnostics.failed",level="ERROR",failure=e)}
-    val save=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
-        if(uri==null) AppDiagnostics.event("diagnostics.save.cancelled")
-        else scope.launch {
-            working=true
-            try {
-                val snapshot=vm.snapshot
-                withContext(Dispatchers.IO){ context.contentResolver.openOutputStream(uri,"wt")?.use { AppDiagnostics.writeBundle(context,snapshot,it) } ?: error("Cannot open diagnostic output") }
-                status=tr(TextKey.DIAGNOSTIC_SAVED);revision++
-            } catch(e:Exception){failed(e)} finally{working=false}
-        }
-    }
-    LaunchedEffect(query,level,revision) {
+    val save = LocalDiagnosticExport.current
+    LaunchedEffect(query,level,revision,vm.diagnosticsResultVersion) {
         try {
             val snapshot=vm.snapshot
             val data=withContext(Dispatchers.IO){ AppDiagnostics.lines(level,query) to AppDiagnostics.environment(context,snapshot).toString(2) }
@@ -115,14 +114,16 @@ import java.time.format.DateTimeFormatter
                     Text(environment,Modifier.fillMaxWidth().heightIn(max=170.dp).verticalScroll(rememberScrollState()),fontSize=11.sp,fontFamily=FontFamily.Monospace)
                 }
                 Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    Button(onClick={try{save.launch(fileName())}catch(e:Exception){failed(e)}},enabled=!working,modifier=Modifier.weight(1f)){Text(tr(TextKey.DIAGNOSTIC_EXPORT))}
-                    OutlinedButton(onClick={scope.launch {
-                        working=true
+                    Button(onClick={status="";try{save(fileName())}catch(e:Exception){failed(e)}},enabled=!working,modifier=Modifier.weight(1f)){Text(tr(TextKey.DIAGNOSTIC_EXPORT))}
+                    OutlinedButton(onClick={
+                      if (!localWorking && !vm.diagnosticsWorking) {
+                        localWorking=true
+                        scope.launch {
                         try {
                             val snapshot=vm.snapshot
                             val uri=withContext(Dispatchers.IO){
                                 val dir=File(context.cacheDir,"shared-backups").apply{check(isDirectory||mkdirs())}
-                                val file=File(dir,fileName())
+                                val file=File.createTempFile(fileName().removeSuffix(".zip")+"-", ".zip", dir)
                                 file.outputStream().use{AppDiagnostics.writeBundle(context,snapshot,it)}
                                 dir.listFiles().orEmpty().filter{it.name.startsWith("FieldStock-diagnostics-")&&it.lastModified()<System.currentTimeMillis()-86_400_000}.forEach{it.delete()}
                                 FileProvider.getUriForFile(context,"${context.packageName}.files",file)
@@ -130,13 +131,15 @@ import java.time.format.DateTimeFormatter
                             val intent=Intent(Intent.ACTION_SEND).apply {type="application/zip";putExtra(Intent.EXTRA_STREAM,uri);clipData=ClipData.newRawUri("Diagnostics",uri);addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)}
                             context.startActivity(Intent.createChooser(intent,tr(TextKey.DIAGNOSTIC_SHARE)))
                             revision++
-                        }catch(e:Exception){failed(e)}finally{working=false}
+                        }catch(e:Exception){failed(e)}finally{localWorking=false}
+                      }
                     }},enabled=!working,modifier=Modifier.weight(1f)){Text(tr(TextKey.DIAGNOSTIC_SHARE))}
                 }
                 OutlinedTextField(query,{query=it.take(200)},label={Text(tr(TextKey.DIAGNOSTIC_SEARCH))},singleLine=true,modifier=Modifier.fillMaxWidth())
                 ChoiceRow(listOf("" to tr(TextKey.DIAGNOSTIC_ALL),"WARN" to tr(TextKey.DIAGNOSTIC_WARN),"ERROR" to tr(TextKey.DIAGNOSTIC_ERRORS)),level,true){level=it}
                 if(working) LinearProgressIndicator(Modifier.fillMaxWidth())
-                if(status.isNotEmpty()) Text(status,fontSize=12.sp,color=Petrol)
+                val displayedStatus = status.ifEmpty { vm.diagnosticsStatus }
+                if(displayedStatus.isNotEmpty()) Text(displayedStatus,fontSize=12.sp,color=Petrol)
                 LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("diagnostic-logs"),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                     if(entries.isEmpty()) item{Text(tr(TextKey.DIAGNOSTIC_EMPTY),fontSize=13.sp)}
                     items(entries){entry->SelectionContainer{Text(entry,fontSize=11.sp,fontFamily=FontFamily.Monospace)}}
@@ -146,6 +149,10 @@ import java.time.format.DateTimeFormatter
         }
     }
     if(clear) ConfirmDialog(tr(TextKey.DIAGNOSTIC_CLEAR),tr(TextKey.DIAGNOSTIC_CLEAR_CONFIRM),tr(TextKey.DIAGNOSTIC_CLEAR),{clear=false}) {
-        clear=false;scope.launch{working=true;try{withContext(Dispatchers.IO){AppDiagnostics.clear()};revision++}catch(e:Exception){failed(e)}finally{working=false}}
+        clear=false
+        if (!localWorking && !vm.diagnosticsWorking) {
+            localWorking=true
+            scope.launch{try{withContext(Dispatchers.IO){AppDiagnostics.clear()};revision++}catch(e:Exception){failed(e)}finally{localWorking=false}}
+        }
     }
 }

@@ -7,10 +7,10 @@ import com.fieldstock.app.model.InventoryTask
 import com.fieldstock.app.model.ItemKind
 import com.fieldstock.app.model.StockRecord
 import com.fieldstock.app.model.Warehouse
+import com.fieldstock.app.model.BoundedJson
 import com.fieldstock.app.i18n.*
 import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 import java.io.ByteArrayOutputStream
 import java.io.FilterOutputStream
 import java.io.InputStream
@@ -103,20 +103,18 @@ object InventoryFiles {
         listOf(ItemKind.PART to language.text(TextKey.PARTS_DETAIL_CSV), ItemKind.MACHINE to language.text(TextKey.MACHINE_DETAIL_CSV)).forEach { (kind, name) ->
             zip.textEntry(name) { writer ->
                 writer.write("\uFEFF")
-                writer.write(csvRow(if (kind == ItemKind.PART) partHeaders(language).toList() else machineHeaders(language).toList()))
+                val headers = if (kind == ItemKind.PART) partHeaders(language).toList() else machineHeaders(language).toList()
+                writer.write(csvRow(headers + language.text(TextKey.CSV_NOTE_ESCAPED)))
                 data.confirmedRecords.filter { it.kind == kind }.forEach { record ->
-                    writer.write(csvRow(data.detailRow(record).map { cell ->
-                        when (cell) { is Text -> cell.value; is Numeric -> cell.value.toString() }
-                    }))
+                    writer.write(reportCsvRow(data.detailRow(record), headers, language))
                 }
             }
         }
         zip.textEntry(language.text(TextKey.PENDING_VERIFICATION_CSV)) { writer ->
             writer.write("\uFEFF")
-            writer.write(csvRow(pendingHeaders(language).toList()))
-            data.pendingRecords.forEach { record -> writer.write(csvRow(data.pendingRow(record).map { cell ->
-                when (cell) { is Text -> cell.value; is Numeric -> cell.value.toString() }
-            })) }
+            val headers = pendingHeaders(language).toList()
+            writer.write(csvRow(headers + language.text(TextKey.CSV_NOTE_ESCAPED)))
+            data.pendingRecords.forEach { record -> writer.write(reportCsvRow(data.pendingRow(record), headers, language)) }
         }
         zip.textEntry(language.text(TextKey.CSV_INSTRUCTIONS_TXT)) { writer ->
             writer.write(language.text(TextKey.CSV_USES_UTF_8_WAREHOUSE_INCLUDES_ALL_HISTORICAL_ACTIVE, warehouseId?.let { data.warehouseLabel(it) } ?: language.text(TextKey.ALL_COUNTRIES_AND_WAREHOUSES)))
@@ -303,9 +301,17 @@ object InventoryFiles {
         return safe.toString().replace(Regex("_x[0-9A-Fa-f]{4}_")) { "_x005F_${it.value.substring(1)}" }
             .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;").replace("\r", "&#13;")
     }
+    private fun reportCsvRow(cells: List<Cell>, headers: List<String>, language: AppLanguage): String {
+        val values = cells.map { cell -> when (cell) { is Text -> cell.value; is Numeric -> cell.value.toString() } }
+        val escaped = requiresCsvProtection(values[headers.indexOf(language.text(TextKey.NOTE))])
+        return csvRow(values + if (escaped) "1" else "0")
+    }
+    internal fun requiresCsvProtection(value: String): Boolean {
+        val first = value.trimStart { it <= '\u0020' || it.isWhitespace() || it == '\uFEFF' }.firstOrNull()
+        return first in listOf('=', '+', '-', '@') || value.startsWith('\t') || value.startsWith('\r') || value.startsWith('\n')
+    }
     private fun csvRow(values: List<String>): String = values.joinToString(",") { original ->
-        val first = original.trimStart { it <= '\u0020' || it.isWhitespace() || it == '\uFEFF' }.firstOrNull()
-        val protected = if (first in listOf('=', '+', '-', '@') || original.startsWith('\t') || original.startsWith('\r') || original.startsWith('\n')) "'$original" else original
+        val protected = if (requiresCsvProtection(original)) "'$original" else original
         "\"${protected.replace("\"", "\"\"")}\""
     } + "\r\n"
 
@@ -319,12 +325,7 @@ object InventoryFiles {
         require(items.size <= MAX_ITEMS) { tr(TextKey.THE_BACKUP_CONTAINS_TOO_MANY_RECORDS) }
         return JSONArray().also { array -> items.forEach { array.put(convert(it)) } }
     }
-    private fun parseObject(text: String): JSONObject {
-        val tokenizer = JSONTokener(text)
-        val value = tokenizer.nextValue()
-        require(value is JSONObject && tokenizer.nextClean() == '\u0000') { tr(TextKey.JSON_MUST_CONTAIN_A_SINGLE_OBJECT) }
-        return value
-    }
+    private fun parseObject(text: String): JSONObject = BoundedJson.objectValue(text)
     private fun JSONObject.exactKeys(vararg expected: String) {
         val actual = keys().asSequence().toSet()
         require(actual == expected.toSet()) { tr(TextKey.THE_BACKUP_HAS_MISSING_OR_UNKNOWN_FIELDS) }
