@@ -71,6 +71,8 @@ class BilingualWorkflowTest {
         compose.onNodeWithText("Choose language / 选择语言").assertIsDisplayed()
         capture("first-use")
         compose.onNodeWithText("English").performClick()
+        compose.waitUntil(20_000) { compose.onAllNodesWithTag("tutorial").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("tutorial-skip").performClick()
         waitFor("Enter warehouse")
         assertEquals(AppLanguage.ENGLISH, LanguageSettings.selected(application))
         scenario!!.recreate()

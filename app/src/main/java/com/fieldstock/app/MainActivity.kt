@@ -43,6 +43,8 @@ import com.fieldstock.app.model.*
 import com.fieldstock.app.scan.ScanActivity
 import com.fieldstock.app.i18n.*
 import com.fieldstock.app.diagnostics.AppDiagnostics
+import com.fieldstock.app.onboarding.NewUserTutorial
+import com.fieldstock.app.onboarding.TutorialPreferences
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
@@ -70,9 +72,15 @@ class MainActivity : LocalizedActivity() {
                 secondaryContainer = Color(0xFFDDEEEB), onSecondaryContainer = Petrol,
                 primaryContainer = Color(0xFFE5EFFC), onPrimaryContainer = Petrol)) {
                 if (LanguageSettings.selected(this) == null) FirstLanguageChooser { language ->
-                    LanguageSettings.select(this, language)
+                    LanguageSettings.select(this, language, beginTutorial = true)
                     recreate()
-                } else DiagnosticExportHost { FieldStockApp() }
+                } else DiagnosticExportHost {
+                    var tutorialPending by remember { mutableStateOf(TutorialPreferences.pending(this)) }
+                    if (tutorialPending) NewUserTutorial { _ ->
+                        TutorialPreferences.finish(this)
+                        tutorialPending = false
+                    } else FieldStockApp()
+                }
             }
         }
     }
@@ -89,6 +97,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var entered by rememberSaveable { mutableStateOf(false) }
     var page by rememberSaveable { mutableIntStateOf(0) }
+    var tutorialOpen by rememberSaveable { mutableStateOf(false) }
     var kind by rememberSaveable { mutableStateOf("PART") }
     var bom by rememberSaveable { mutableStateOf("") }
     var pn by rememberSaveable { mutableStateOf("") }
@@ -324,10 +333,16 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
                     catch(e:Exception){ AppDiagnostics.event("import.picker.failed",level="ERROR",failure=e);vm.error=tr(TextKey.COULD_NOT_READ_IMPORT_FILE,e.message) }
                 },
                     onTemplate = { vm.prepareExport("template", false) { createTemplate.launch(tr(TextKey.FIELDSTOCK_IMPORT_TEMPLATE_CSV)) } }, backups = backupActions)
-                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup, onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions)
+                else -> SettingsPage(vm, onChoose = ::chooseWarehouse, onRestore = ::restoreBackup,
+                    onStructureChanged = { clearForm(); keepBom = false }, backups = backupActions,
+                    onTutorial = { clearFocus(); tutorialOpen = true })
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
         }
+    }
+    if (tutorialOpen) androidx.compose.ui.window.Dialog(onDismissRequest = { tutorialOpen = false },
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        NewUserTutorial(replay = true) { _ -> tutorialOpen = false }
     }
     if (moreOpen) AlertDialog(onDismissRequest = { moreOpen = false }, title = { Text(tr(TextKey.CONDITION_AND_NOTES)) }, text = {
         Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {

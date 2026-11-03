@@ -6,7 +6,7 @@ An offline inventory app for one person using one Android phone. Count parts and
 
 ## Download and install
 
-Requires **Android 8.0 or later**. Current release: **2.4.4 hotfix** (version code 10, unchanged), including audit fixes for stock merges, file round trips, scanning and diagnostics.
+Requires **Android 8.0 or later**. Current release: **2.4.4** (version code 10), including a first-use guide and the earlier audit fixes.
 
 [2.4.4 release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
 
@@ -14,6 +14,7 @@ This release uses the same fixed customer signing key as 2.4.1 and can update it
 
 ## Features
 
+- **Quick start:** A four-step visual guide appears after the first language choice. Swipe, go back or skip, and reopen it from Settings. Once completed or skipped, it stays dismissed across app updates. Available in Chinese and English.
 - **Count and manage:** Parts by BOM and quantity, with an existing-stock check after typing or scanning. Machines require SN; BOM and PN are optional. Edit, void, restore, batch-manage records, and merge warehouses within a country.
 - **Scan offline:** Single or continuous OCR for BOM, PN and SN; multiline note scanning for both parts and machines, with photo zoom and ambiguous-character review. Confirm the value and save it manually. Barcode and QR decoding are outside the feature set.
 - **Chinese and English:** Choose a language on first use and change it in Settings. UI, reports and templates follow the selected language; imports accept either language. Identifiers, names and notes retain their original text.
@@ -22,7 +23,7 @@ This release uses the same fixed customer signing key as 2.4.1 and can update it
 
 ## Get started
 
-1. Choose English or Chinese, then create or select a country and warehouse.
+1. Choose English or Chinese, read or skip the four-step guide, then create or select a country and warehouse. Reopen the guide with **View quick start** in Settings.
 2. For parts, enter or scan the BOM and add a quantity; existing records appear below. For machines, enter an SN and optionally a BOM and PN. Use **More** for condition and notes, including note scanning.
 3. Save, then review entries in **Records**. At the end of the day, use **Files → Export** to save reports and a full backup, and copy them to another device.
 

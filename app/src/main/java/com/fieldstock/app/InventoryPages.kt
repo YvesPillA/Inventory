@@ -109,7 +109,7 @@ private fun WarehousePicker(vm: InventoryViewModel, enterLabel: String, allowCre
 }
 
 @Composable
-internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit, onStructureChanged: () -> Unit = {}, backups: BackupActions) {
+internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, onRestore: () -> Unit, onStructureChanged: () -> Unit = {}, backups: BackupActions, onTutorial: () -> Unit = {}) {
     var rename by remember { mutableStateOf<Pair<String, String>?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var deleting by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -124,6 +124,9 @@ internal fun SettingsPage(vm: InventoryViewModel, onChoose: (String) -> Unit, on
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(tr(TextKey.SETTINGS), fontSize = 22.sp, fontWeight = FontWeight.Bold)
         LanguageSetting(enabled = !vm.busy, beforeChange = vm::onLanguageChanged)
+        OutlinedButton(onClick = onTutorial, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            Text(tr(TextKey.TUTORIAL_REPLAY))
+        }
         Text(tr(TextKey.SWITCH_OR_CREATE_A_COUNTRY_AND_WAREHOUSE), style = MaterialTheme.typography.titleMedium)
         WarehousePicker(vm, tr(TextKey.SWITCH_TO_THIS_WAREHOUSE), onEnter = onChoose)
         HorizontalDivider()
