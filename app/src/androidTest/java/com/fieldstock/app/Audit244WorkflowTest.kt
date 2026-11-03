@@ -16,6 +16,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.fieldstock.app.backup.*
 import com.fieldstock.app.data.InventoryRepository
+import com.fieldstock.app.diagnostics.AppDiagnostics
 import com.fieldstock.app.i18n.*
 import com.fieldstock.app.importdata.ImportRow
 import com.fieldstock.app.model.*
@@ -164,7 +165,7 @@ class Audit244WorkflowTest {
             ZipFile(file).use { zip ->
                 val env = JSONObject(zip.getInputStream(zip.getEntry("environment.json")).bufferedReader().readText())
                 assertEquals(1, env.getJSONObject("inventory_counts").getInt("records"))
-                assertEquals("2.4.4-hotfix-audit-20261030", env.getJSONObject("app").getString("revision"))
+                assertEquals(AppDiagnostics.BUILD_REVISION, env.getJSONObject("app").getString("revision"))
                 assertNotNull(zip.getEntry("operations/events.jsonl"))
             }
         } finally { instrumentation.removeMonitor(monitor); file.delete() }

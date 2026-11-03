@@ -3,6 +3,7 @@ package com.fieldstock.app.i18n
 import android.content.Context
 import android.content.res.Configuration
 import androidx.activity.ComponentActivity
+import com.fieldstock.app.onboarding.TutorialPreferences
 import java.util.Locale
 
 object LanguageSettings {
@@ -11,9 +12,12 @@ object LanguageSettings {
         context.getSharedPreferences("fieldstock", Context.MODE_PRIVATE).getString(KEY, null)
     )
 
-    fun select(context: Context, language: AppLanguage) {
-        check(context.getSharedPreferences("fieldstock", Context.MODE_PRIVATE).edit()
-            .putString(KEY, language.tag).commit())
+    fun select(context: Context, language: AppLanguage) = select(context, language, beginTutorial = false)
+
+    fun select(context: Context, language: AppLanguage, beginTutorial: Boolean) {
+        val editor = context.getSharedPreferences("fieldstock", Context.MODE_PRIVATE).edit().putString(KEY, language.tag)
+        if (beginTutorial) editor.putBoolean(TutorialPreferences.PENDING, true)
+        check(editor.commit())
         AppLanguage.current = language
         com.fieldstock.app.diagnostics.AppDiagnostics.event("language.changed",mapOf("language" to language.tag))
     }
