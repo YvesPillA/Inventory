@@ -2,67 +2,28 @@
 
 [简体中文](README.md)
 
-An offline inventory app for one person using one Android phone. Count parts and machines across countries and warehouses, read printed labels, export reports, and keep full backups. No account or network connection is required.
+An offline Android inventory app for parts and machines, organized by country and warehouse. Includes Chinese and English, printed-label OCR, Excel/CSV reports, and full backups. No account or internet connection required.
 
-## Download and install
+## Download
 
-Requires **Android 8.0 or later**. Current release: **2.4.4** (version code 10), including a first-use guide and the earlier audit fixes.
+Current version: **2.4.4**. Requires **Android 8.0 or later**.
 
-[2.4.4 release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [SHA256 checksums](artifacts/SHA256SUMS.txt)
+[Release APK](artifacts/盘库助手-2.4.4.apk) · [Source archive](artifacts/盘库助手-2.4.4-源码.zip) · [Checksums](artifacts/SHA256SUMS.txt)
 
-This release uses the same fixed customer signing key as 2.4.1 and can update it directly. It cannot replace earlier Chinese builds signed with the original key. If you already use an earlier build, export a full JSON backup and copy it elsewhere; **do not uninstall before saving your backup**.
+Export full backups regularly and copy them to another device.
 
 ## Features
 
-- **Quick start:** A four-step visual guide appears after the first language choice. Swipe, go back or skip, and reopen it from Settings. Once completed or skipped, it stays dismissed across app updates. Available in Chinese and English.
-- **Count and manage:** Parts by BOM and quantity, with an existing-stock check after typing or scanning. Machines require SN; BOM and PN are optional. Edit, void, restore, batch-manage records, and merge warehouses within a country.
-- **Scan offline:** Single or continuous OCR for BOM, PN and SN; multiline note scanning for both parts and machines, with photo zoom and ambiguous-character review. Confirm the value and save it manually. Barcode and QR decoding are outside the feature set.
-- **Chinese and English:** Choose a language on first use and change it in Settings. UI, reports and templates follow the selected language; imports accept either language. Identifiers, names and notes retain their original text.
-- **Export and recover:** Excel/CSV for the current warehouse; full JSON backups for all warehouses. Keep up to seven local backups and up to five recovery points for important operations, subject to capacity.
-- **Check quantities:** Preview import totals and review duplicate-file warnings. Normal and damaged quantities are separate; pending and voided records are excluded from confirmed totals.
+- **Parts and machines:** Count parts by BOM and quantity, with existing records shown after typing or scanning. Machines require only an SN; BOM and PN are optional.
+- **Offline scanning:** Read BOM, PN, SN, and multiline notes. Review recognized text before saving.
+- **Chinese and English:** Choose a language on first use or change it in Settings. Import templates, reports, and backups from either language.
+- **Import and export:** Export Excel/CSV reports and full JSON backups, then import them directly. Includes duplicate checks and warehouse merging.
+- **Guidance and recovery:** Built-in quick start, local automatic backups, recovery points, and diagnostic logs.
 
-## Get started
+## Use and development
 
-1. Choose English or Chinese, read or skip the four-step guide, then create or select a country and warehouse. Reopen the guide with **View quick start** in Settings.
-2. For parts, enter or scan the BOM and add a quantity; existing records appear below. For machines, enter an SN and optionally a BOM and PN. Use **More** for condition and notes, including note scanning.
-3. Save, then review entries in **Records**. At the end of the day, use **Files → Export** to save reports and a full backup, and copy them to another device.
+Choose a language, follow the quick start, and create a country and warehouse to begin counting. Export reports and a full backup when finished.
 
-BOMs contain 1–14 letters or digits. PNs allow up to 100 letters/digits with multiple hyphens connecting nonempty groups. SNs have two nonempty groups joined by `-`, with at most 14 letters/digits in total. Leading zeros and case are preserved. An active machine SN must be unique across all countries and warehouses.
+[Operating guide](docs/操作说明.md) · [Build and signing](docs/构建与发布.md) · [Version history](docs/版本记录.md) · [Validation](docs/验收记录.md) (Chinese)
 
-## Import and export
-
-File selection now shows reading progress and brings the preview into view. Documents returned during startup or a backup check wait for that operation instead of being discarded. Local diagnostics retain operation history, errors and UI stalls; developer tools can filter, export and share a diagnostic bundle.
-
-In **Files → Import**, choose an exported **Excel workbook, CSV ZIP, full JSON backup** or standard CSV directly. Chinese and English files work in either interface language. Excel/CSV rows go into the selected warehouse; JSON backups retain their original countries, warehouses, records and history and require confirmation before merging.
-
-For a country name conflict, add the backup warehouses to the existing country. For a warehouse name conflict, merge it or rename it before adding. Matching parts with the same BOM and condition can become separate entries or add to the existing quantity. Reimporting the same backup does not add its quantities again, including after later merges or migration. Processed source identities and history are retained. Renamed locations can reuse the existing location after confirmation, and important operations can be undone through local recovery points.
-
-The downloadable **UTF-8 CSV** template accepts Chinese, English or mixed headers in this order. English headers and fixed values are case-insensitive.
-
-| English / Chinese | Values |
-| --- | --- |
-| Type / 类型 | Part / Parts / 配件; Machine / 整机 |
-| BOM | Letters or digits; optional for machines |
-| SN | Empty for parts; full `prefix-suffix` for machines |
-| Quantity / 数量 | Positive integer; exactly 1 for machines |
-| Condition / 状态 | Normal / 正常; Damaged / 损坏; Pending verification / Pending / 待核查 |
-| Note / 备注 | Original free text and line breaks; pending rows need at least one identifier or a note |
-| PN | Optional for machines; letters, digits and multiple hyphens. Empty for parts |
-
-Legacy six-column CSVs without PN still work; the new template appends PN as the seventh column. Format BOM, PN and SN columns as text before entering values in Excel, then save as CSV UTF-8. Limits: 8 MiB and 10,000 rows. Invalid files report a row number and cancel the entire batch. CSV adds inventory; accepting a repeated import adds it again.
-
-Excel reports contain the counting guide, parts detail/summary, machine detail and pending records. CSV ZIP contains three reports and instructions. **Reports can be imported directly.** Only detail rows are read; guide and summary sheets are skipped. Repeated report record IDs cancel the batch. Older reports without PN also work. Identifier case, leading zeros, and note spaces and line breaks are retained.
-
-New report CSVs include a **Note escaped / 备注转义** flag so reimport can restore the original note after spreadsheet formula protection. Older CSVs without this flag retain their literal text. The standard import template is unchanged. Use JSON for a complete migration: up to 32 MiB, including all warehouses, voided records and history. Previously processed sources are skipped; unmatched conflicting IDs cancel the merge, and newly imported duplicate machine SNs become voided records.
-
-2.4.4 reads legacy backups. New format-v2 backups preserve PN and require 2.4.2 or a later compatible version to restore. Local backups and recovery points are deleted on uninstall. Recovery points, CSV import history, preferences and scan photos are not included in portable backups.
-
-## Development and documentation
-
-Built with Kotlin, Jetpack Compose, SQLite, CameraX and bundled ML Kit OCR. Requires JDK 17 and Android SDK 35:
-
-```powershell
-.\gradlew.bat assembleDebug testDebugUnitTest lintDebug
-```
-
-See the [build and signing guide](docs/构建与发布.md), [operating guide](docs/操作说明.md), [version history](docs/版本记录.md), and [validation records](docs/验收记录.md) (Chinese). Check actual labels, exports and backup recovery on your phone before field use.
+Built with Kotlin, Jetpack Compose, and SQLite. Requires JDK 17 and Android SDK 35. Signing keys and passwords are kept privately by the maintainer and excluded from the repository and public source archives.
