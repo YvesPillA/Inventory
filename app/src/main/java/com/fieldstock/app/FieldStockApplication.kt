@@ -16,7 +16,7 @@ class FieldStockApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         AppDiagnostics.initialize(this)
-        AppDiagnostics.event("process.started",mapOf("pid" to android.os.Process.myPid()))
+        AppDiagnostics.event("process.started",mapOf("pid" to android.os.Process.myPid(), "revision" to AppDiagnostics.BUILD_REVISION))
         val previous=Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread,failure ->
             AppDiagnostics.crash(thread,failure)

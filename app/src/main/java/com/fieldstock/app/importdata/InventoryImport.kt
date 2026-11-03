@@ -34,7 +34,17 @@ object InventoryImport {
         val source = input.buffered()
         source.mark(4096)
         val prefix = ByteArray(4096)
-        val count = source.read(prefix)
+        var count = 0
+        // Content providers may legally return a short read, including a split UTF-8 BOM.
+        while (count < prefix.size) {
+            val read = source.read(prefix, count, prefix.size - count)
+            if (read < 0) break
+            if (read == 0) {
+                val byte = source.read()
+                if (byte < 0) break
+                prefix[count++] = byte.toByte()
+            } else count += read
+        }
         source.reset()
         val json = count > 0 && prefix.copyOf(count).toString(Charsets.UTF_8).removePrefix("\uFEFF").trimStart().startsWith("{")
         AppDiagnostics.event("import.format",mapOf("format" to if(json)"JSON" else if(count>=2&&prefix[0]==80.toByte()&&prefix[1]==75.toByte())"XLSX_OR_ZIP" else "CSV"))
@@ -83,7 +93,7 @@ object InventoryImport {
         return readCsv(bytes, fileName)
     }
 
-    internal fun readCsv(bytes: ByteArray, fileName: String?): List<ImportRow> {
+    internal fun readCsv(bytes: ByteArray, fileName: String?, seenReportIds: MutableSet<String> = mutableSetOf()): List<ImportRow> {
         val text = try {
             Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix("\uFEFF")
@@ -113,6 +123,7 @@ object InventoryImport {
             finishField()
             if (fields.any { it.isNotBlank() }) {
                 if (!foundHeader) {
+                    if (fields.any { it.length > MAX_FIELD_CHARS }) invalid(rowStartLine, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
                     if (!isHeader(fields)) {
                         reportColumns = InventoryReportImport.columns(fields)
                             ?: invalid(rowStartLine, tr(TextKey.HEADERS_MUST_BE_IN_THIS_ORDER_TYPE_BOM_SN))
@@ -124,13 +135,17 @@ object InventoryImport {
                     if (isHeader(fields) || fields == headers) invalid(rowStartLine, tr(TextKey.REPEATED_HEADER_KEEP_ONLY_THE_FIRST_HEADER_ROW))
                     if (fields.size != expectedColumns) invalid(rowStartLine, tr(TextKey.CSV_COLUMN_COUNT, expectedColumns, fields.size))
                     if (rows.size >= MAX_ROWS) invalid(rowStartLine, tr(TextKey.DATA_MUST_NOT_EXCEED_10000_ROWS_IMPORT_IN_SMALLER))
-                    rows.add(validate(reportColumns?.standardFields(fields) ?: fields, rowStartLine))
+                    reportColumns?.checkRecordId(fields, seenReportIds) { message -> invalid(rowStartLine, message) }
+                    val values = reportColumns?.standardFields(fields) ?: fields
+                    if (values.any { it.length > MAX_FIELD_CHARS }) invalid(rowStartLine, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
+                    rows.add(validate(values, rowStartLine))
                 }
             }
             fields.clear()
         }
         fun append(character: Char) {
-            if (field.length >= MAX_FIELD_CHARS) invalid(rowStartLine, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
+            // Report CSV may contain one extra safety apostrophe; validate decoded fields below.
+            if (field.length >= MAX_FIELD_CHARS + 1) invalid(rowStartLine, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
             field.append(character)
         }
 
@@ -180,6 +195,7 @@ object InventoryImport {
         val pn = fields.getOrElse(6) { "" }
         val condition = StockCondition.parse(fields[4]) ?: invalid(line, tr(TextKey.CONDITION_MUST_BE_NORMAL_DAMAGED_OR_PENDING_VERIFICATION_CHINESE))
         val note = fields[5]
+        if (note.length > MAX_FIELD_CHARS) invalid(line, tr(TextKey.EACH_FIELD_MUST_NOT_EXCEED_4000_CHARACTERS))
         val pending = condition == StockCondition.PENDING
         if ((kind == ItemKind.PART && !pending) || bom.isNotEmpty()) IdentifierRules.validateBom(bom)?.let { invalid(line, it) }
         if (kind == ItemKind.PART && sn.isNotEmpty()) invalid(line, tr(TextKey.SN_MUST_BE_EMPTY_FOR_PARTS))

@@ -2,6 +2,21 @@ package com.fieldstock.app.i18n
 
 /** Typed bilingual messages shared by UI, validation and file writers; no Android dependency. */
 enum class TextKey(val chinese: String, val english: String) {
+    IMPORT_NOTE_ESCAPE_INVALID("备注转义标记必须为0或1，标记为1时备注须带有效的安全前缀。", "Note escape flag must be 0 or 1. A flag of 1 requires a valid safety prefix."),
+    BACKUP_LOCATION_RENAMED("备份名称：{0}；现有名称：{1}。使用现有位置并保留现有名称。", "Backup name: {0}; current name: {1}. Use the existing location and keep its current name."),
+    CSV_NOTE_ESCAPED("备注转义", "Note escaped"),
+    IMPORT_DUPLICATE_REPORT_ID("报表记录 ID 重复：{0}。同一条明细请只保留一份。", "Repeated report record ID: {0}. Include each detail record only once."),
+    BOM_EXCEEDS_NOTE_LIMIT_AFTER_MERGING_CHOOSE_NEW("BOM {0}（{1}）合并后备注超过4000字，请选择新增条目。", "BOM {0} ({1}) would exceed the 4000-character note limit after merging. Choose new entries."),
+    BACKUP_CHOOSE_COUNTRY("请选择将备份仓库加入现有国家：{0}", "Choose to add the backup warehouses to the existing country: {0}"),
+    BACKUP_USE_COUNTRY("将仓库加入现有国家「{0}」", "Add warehouses to existing country “{0}”"),
+    BACKUP_CHOOSE_WAREHOUSE("请选择同名仓库「{0}」的处理方式", "Choose how to handle the existing warehouse “{0}”"),
+    BACKUP_WAREHOUSE_CONFLICT("{0} / {1}：已有同名仓库", "{0} / {1}: a warehouse with this name exists"),
+    BACKUP_MERGE_WAREHOUSE("合并到现有仓库", "Merge into existing warehouse"),
+    BACKUP_RENAME_WAREHOUSE("改名后加入", "Rename and add"),
+    BACKUP_RENAME_REQUIRED("请输入有效的新仓库名称，最多100字。", "Enter a valid new warehouse name, up to 100 characters."),
+    BACKUP_RESOLUTION_HELP("先处理同名国家和仓库，再确认导入。", "Resolve country and warehouse names before importing."),
+    BACKUP_MERGE_SUMMARY("{0} 个仓库，{1} 条记录。相同记录跳过，重复 SN 整机转作废。", "{0} warehouses, {1} records. Identical records are skipped; duplicate machine SNs are voided."),
+    BACKUP_ALREADY_IMPORTED("其中 {0} 条已导入，将跳过。", "{0} records were already imported and will be skipped."),
     OPTIONAL_IDENTIFIER("{0}（选填）", "{0} (optional)"),
     ENTER_A_PN("请输入 PN", "Enter a PN"),
     PN_FORMAT_HELP("PN：数字、字母，可用多段横线连接，最多100位。", "PN: letters and digits, optionally joined by multiple hyphens; up to 100 characters."),

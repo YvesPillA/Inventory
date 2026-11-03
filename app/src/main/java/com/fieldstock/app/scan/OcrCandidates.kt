@@ -100,8 +100,7 @@ object OcrCandidates {
     }
 
     private fun mayJoinSpaces(value: String, field: IdentifierField): Boolean {
-        if (field == IdentifierField.SN) return value.count { it == '-' } == 1
-        if (field == IdentifierField.PN && '-' in value) {
+        if ((field == IdentifierField.SN || field == IdentifierField.PN) && '-' in value) {
             // Join only whitespace around separators, never two independent codes.
             return !value.replace(Regex("\\s*-\\s*"), "-").any(Char::isWhitespace)
         }

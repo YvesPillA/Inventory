@@ -22,8 +22,6 @@ class AutomaticBackups(
     private val clock: Clock? = null,
     private val writer: (InventorySnapshot, OutputStream) -> Unit = InventoryFiles::writeBackup,
 ) {
-    private val verified = mutableSetOf<String>()
-
     fun entries(): List<AutomaticBackup> = directory.listFiles().orEmpty().mapNotNull { file ->
         if (!file.isFile) return@mapNotNull null
         val match = NAME.matchEntire(file.name) ?: return@mapNotNull null
@@ -35,7 +33,7 @@ class AutomaticBackups(
     fun ensureDaily(snapshot: () -> InventorySnapshot): AutomaticBackup? {
         val today = LocalDate.now(currentClock())
         val validToday = entries().filter { it.day == today }.any { entry ->
-            entry.id in verified || runCatching { read(entry.id); true }.getOrDefault(false)
+            runCatching { read(entry.id); true }.getOrDefault(false)
         }
         return if (validToday) null else create(snapshot())
     }
@@ -56,11 +54,10 @@ class AutomaticBackups(
             val restored = temporary.inputStream().use(InventoryFiles::readBackup)
             check(restored == snapshot) { tr(TextKey.BACKUP_VERIFICATION_DIFFERS_FROM_INVENTORY_EXISTING_BACKUPS_WERE_KEPT) }
             check(temporary.renameTo(destination)) { tr(TextKey.COULD_NOT_SAVE_THE_FULL_BACKUP_CHECK_AVAILABLE_STORAGE) }
-            verified += destination.name
             val entry = AutomaticBackup(destination.name, at, day, destination.length())
             // Retain the newly created file even after the phone's clock moves backwards.
             val stale = entries().filter { it.id != entry.id }.drop(KEEP - 1)
-            check(stale.all { fileFor(it.id).delete().also { removed -> if (removed) verified -= it.id } }) {
+            check(stale.all { fileFor(it.id).delete() }) {
                 tr(TextKey.NEW_BACKUP_SAVED_SOME_OLDER_BACKUPS_COULD_NOT_BE)
             }
             return entry
@@ -69,7 +66,7 @@ class AutomaticBackups(
         }
     }
 
-    fun read(id: String): InventorySnapshot = fileFor(id).inputStream().use(InventoryFiles::readBackup).also { verified += id }
+    fun read(id: String): InventorySnapshot = fileFor(id).inputStream().use(InventoryFiles::readBackup)
 
     /** Validate before exposing a file through Android's save/share picker. */
     fun copyTo(id: String, output: OutputStream) {

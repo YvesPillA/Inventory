@@ -20,6 +20,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 object AppDiagnostics {
+    const val BUILD_REVISION = "2.4.4-hotfix-audit-20261030"
     @Volatile private var store: DiagnosticStore? = null
     @Volatile var lastFailure: String? = null; private set
     private val writer = ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,ArrayBlockingQueue(512),
@@ -45,6 +46,7 @@ object AppDiagnostics {
         val pkg=context.packageManager.getPackageInfo(context.packageName,0)
         val storage=StatFs(context.filesDir.absolutePath)
         val app=JSONObject().put("package",context.packageName).put("version",pkg.versionName)
+            .put("revision", BUILD_REVISION)
             .put("versionCode",if(Build.VERSION.SDK_INT>=28)pkg.longVersionCode else pkg.versionCode.toLong())
             .put("language",AppLanguage.current.tag).put("debuggable",(context.applicationInfo.flags and 2)!=0)
         val device=JSONObject().put("manufacturer",Build.MANUFACTURER).put("model",Build.MODEL).put("android",Build.VERSION.RELEASE)

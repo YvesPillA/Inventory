@@ -139,6 +139,19 @@ class AutomaticBackupsTest {
         assertEquals(2, reopened.entries().size)
     }
 
+    @Test fun sameProcessRechecksCorruptedBackupInsteadOfTrustingItsPreviouslyVerifiedName() {
+        val directory = folder.newFolder()
+        val store = AutomaticBackups(directory, clock())
+        val old = store.ensureDaily(::snapshot)!!
+        File(directory, old.id).writeText("{}")
+
+        val replacement = store.ensureDaily(::snapshot)
+
+        assertNotNull("A cached filename must not suppress replacement of a damaged daily backup", replacement)
+        assertNotEquals(old.id, replacement!!.id)
+        assertEquals(snapshot(), store.read(replacement.id))
+    }
+
     @Test fun manualBackupCanCaptureLaterInventoryOnSameDay() {
         val directory = folder.newFolder()
         val store = AutomaticBackups(directory, clock())
