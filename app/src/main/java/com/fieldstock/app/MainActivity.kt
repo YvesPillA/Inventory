@@ -29,7 +29,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -399,7 +398,7 @@ private fun FieldStockApp(vm: InventoryViewModel = viewModel()) {
     if (vm.duplicateSummary.isNotEmpty()) AlertDialog(onDismissRequest = { vm.duplicateSummary = emptyList() }, title = { Text(tr(TextKey.DUPLICATE_SNS_SAVED_AS_VOIDED)) },
         text = { Column(Modifier.heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
             Text(tr(TextKey.SAVED_DUPLICATE_MACHINE_RECORDS_ON_THE_VOIDED_TAB_EXISTING, vm.duplicateSummary.size))
-            vm.duplicateSummary.forEach { Text("BOM：${it.bom}\nSN：${it.sn}\n${vm.warehouseLabel(it.warehouseId)}", modifier = Modifier.padding(top = 8.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
+            vm.duplicateSummary.forEach { Text("BOM：${it.bom}\nSN：${it.sn}\n${vm.warehouseLabel(it.warehouseId)}", modifier = Modifier.padding(top = 8.dp), fontFamily = IdentifierFont, fontSize = 13.sp) }
         } }, confirmButton = { TextButton(onClick = { vm.duplicateSummary = emptyList() }) { Text(tr(TextKey.OK)) } })
     vm.error?.let { message -> AlertDialog(onDismissRequest = { vm.error = null }, title = { Text(tr(TextKey.OPERATION_INCOMPLETE)) }, text = { Text(message) }, confirmButton = { TextButton(onClick = { vm.error = null }) { Text(tr(TextKey.OK)) } }) }
     vm.restoreCandidate?.let { candidate -> BackupMergeDialog(vm, candidate) }
@@ -428,7 +427,7 @@ internal fun ChoiceRow(options: List<Pair<String, String>>, selected: String, en
 @Composable
 private fun CodeField(label: String, value: String, change: (String) -> Unit, modifier: Modifier, enabled: Boolean, error: Boolean = false) {
     OutlinedTextField(value, change, label = { Text(label, fontSize = 12.sp, maxLines = 1) }, singleLine = true, enabled = enabled, isError = error,
-        textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 17.sp),
+        textStyle = LocalTextStyle.current.copy(fontFamily = IdentifierFont, fontSize = 17.sp),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Next), modifier = modifier)
 }
 

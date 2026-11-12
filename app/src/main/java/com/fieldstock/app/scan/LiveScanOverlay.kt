@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.IdentifierFont
+
 import com.fieldstock.app.i18n.*
 
 import androidx.compose.foundation.Canvas
@@ -23,7 +25,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -63,7 +64,7 @@ internal fun LiveScanOverlay(codes: List<TrackedCode>, roi: CodeBox, enabled: Bo
                     .semantics { contentDescription = tr(TextKey.ON_SCREEN_CODE, marker.number, value) }.padding(horizontal = 10.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
-                Text("${marker.number}  $value", color = Color.White, fontFamily = FontFamily.Monospace,
+                Text("${marker.number}  $value", color = Color.White, fontFamily = IdentifierFont,
                     fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -86,7 +87,7 @@ internal fun LiveCodeList(codes: List<TrackedCode>, paused: Boolean, enabled: Bo
                     .semantics { contentDescription = tr(TextKey.LISTED_CODE, index + 1, hit.code.candidate.value) }
                     .padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("${index + 1}", color = MarkerBlue, fontSize = 13.sp, modifier = Modifier.width(28.dp))
-                    Text(hit.code.candidate.value, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
+                    Text(hit.code.candidate.value, fontFamily = IdentifierFont, fontWeight = FontWeight.SemiBold,
                         fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     Text(tr(TextKey.SELECT_2), color = MarkerBlue, fontSize = 12.sp)
                 }

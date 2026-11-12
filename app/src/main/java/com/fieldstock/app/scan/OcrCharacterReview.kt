@@ -1,5 +1,7 @@
 package com.fieldstock.app.scan
 
+import com.fieldstock.app.IdentifierFont
+
 import com.fieldstock.app.i18n.*
 
 import androidx.compose.foundation.layout.Arrangement
@@ -21,7 +23,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -55,7 +56,7 @@ internal fun CharacterReview(value: String, onChange: (String) -> Unit) {
                 FilterChip(
                     selected = chosen == index,
                     onClick = { chosen = index },
-                    label = { Text("${index + 1}：${value[index]}", fontFamily = FontFamily.Monospace) },
+                    label = { Text("${index + 1}：${value[index]}", fontFamily = IdentifierFont) },
                     modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = tr(TextKey.REVIEW_CHARACTER, index + 1, value[index]) },
                 )
             }
@@ -68,7 +69,7 @@ internal fun CharacterReview(value: String, onChange: (String) -> Unit) {
                         onClick = { onChange(OcrCharacterReview.replace(value, chosen, replacement)) },
                         modifier = Modifier.heightIn(min = 48.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp),
-                    ) { Text(OcrCharacterReview.label(replacement), fontFamily = FontFamily.Monospace) }
+                    ) { Text(OcrCharacterReview.label(replacement), fontFamily = IdentifierFont) }
                 }
             }
         }

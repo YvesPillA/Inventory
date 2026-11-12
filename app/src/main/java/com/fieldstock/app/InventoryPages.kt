@@ -20,7 +20,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -226,7 +225,7 @@ internal fun PartBomLookup(records: List<StockRecord>, warehouseId: String, bom:
             items(matches, key = { it.id }) { record ->
                 Surface(color = Color.White, shape = MaterialTheme.shapes.small) {
                     Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(record.bom, fontFamily = FontFamily.Monospace, fontSize = 16.sp)
+                        Text(record.bom, fontFamily = IdentifierFont, fontSize = 16.sp)
                         Text(tr(TextKey.PARTS_PCS, record.quantity) + " · " + conditionLabel(record.condition), fontSize = 13.sp, color = Petrol)
                         if (record.note.isNotEmpty()) Text(record.note, fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
                         Text(InventoryViewModel.formatTime(record.updatedAt), fontSize = 11.sp, color = Color.Gray)
@@ -255,7 +254,7 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
     }.sortedByDescending { it.updatedAt }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         ChoiceRow(listOf("active" to tr(TextKey.ACTIVE), "voided" to tr(TextKey.VOIDED)), category, !vm.busy) { category = it; selecting = false; selected = emptySet() }
-        OutlinedTextField(query, { query = it }, label = { Text(tr(TextKey.SEARCH_BOM_SN_OR_NOTES)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(query, { query = it }, textStyle = LocalTextStyle.current.copy(fontFamily = IdentifierFont), label = { Text(tr(TextKey.SEARCH_BOM_SN_OR_NOTES)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("ALL" to tr(TextKey.ALL), "PART" to tr(TextKey.PARTS), "MACHINE" to tr(TextKey.MACHINE), "PENDING" to tr(TextKey.PENDING_FILTER)).forEach { (id, title) ->
                 FilterChip(filter == id, { filter = id }, label = { Text(title, fontSize = 12.sp) })
@@ -291,9 +290,9 @@ internal fun RecordsPage(vm: InventoryViewModel, onEdit: (StockRecord) -> Unit, 
                             Text(if (record.kind == ItemKind.PART) tr(TextKey.PARTS_PCS, record.quantity) else tr(TextKey.MACHINE_1_UNIT), fontWeight = FontWeight.Medium)
                             Text(if (voided) tr(TextKey.VOIDED_2) else conditionLabel(record.condition), color = if (record.condition == StockCondition.NORMAL && !voided) Teal else Amber, fontSize = 12.sp)
                         }
-                        if (record.kind == ItemKind.PART || record.bom.isNotEmpty()) Text(record.bom.ifEmpty { tr(TextKey.BOM_PENDING_VERIFICATION) }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
-                        if (record.pn.isNotEmpty()) Text("PN: " + record.pn, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
-                        if (record.kind == ItemKind.MACHINE) Text(record.sn.ifEmpty { tr(TextKey.SN_PENDING_VERIFICATION) }, fontFamily = FontFamily.Monospace, fontSize = 17.sp)
+                        if (record.kind == ItemKind.PART || record.bom.isNotEmpty()) Text(record.bom.ifEmpty { tr(TextKey.BOM_PENDING_VERIFICATION) }, fontFamily = IdentifierFont, fontSize = 17.sp)
+                        if (record.pn.isNotEmpty()) Text("PN: " + record.pn, fontFamily = IdentifierFont, fontSize = 17.sp)
+                        if (record.kind == ItemKind.MACHINE) Text(record.sn.ifEmpty { tr(TextKey.SN_PENDING_VERIFICATION) }, fontFamily = IdentifierFont, fontSize = 17.sp)
                         if (record.note.isNotEmpty()) Text(record.note, fontSize = 13.sp)
                         Text(InventoryViewModel.formatTime(record.updatedAt), fontSize = 11.sp, color = Color.Gray)
                         if (!selecting) Row {
