@@ -1,0 +1,10 @@
+FieldStock Identifiers is derived from JetBrains Mono.
+Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+Licensed under SIL OFL 1.1; see OFL-JetBrainsMono.txt.
+
+Source: https://github.com/google/fonts/blob/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf
+Source SHA256: 48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda
+
+Modifications: static ASCII subsets at weights 400/600/700, slashed zero selected,
+circular capital O with wider advance, code ligatures removed, and family renamed.
+Rebuild: python tools/build_identifier_fonts.py <upstream-font.ttf> (fonttools 4.68.0).

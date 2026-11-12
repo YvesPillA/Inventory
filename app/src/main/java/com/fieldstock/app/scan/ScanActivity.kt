@@ -40,6 +40,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import com.fieldstock.app.IdentifierFont
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -441,7 +443,7 @@ class ScanActivity : LocalizedActivity() {
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(candidate.value, fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(candidate.value, fontFamily = if (field == IdentifierField.NOTE) FontFamily.Monospace else IdentifierFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             Text(if (selected) tr(TextKey.SELECTED_2) else tr(TextKey.SELECT_2), color = Color(0xFF125BCB), fontSize = 13.sp)
                         }
                         if (candidate.corrections.isNotEmpty()) {
@@ -453,6 +455,7 @@ class ScanActivity : LocalizedActivity() {
             }
             OutlinedTextField(
                 value = editedValue,
+                textStyle = LocalTextStyle.current.copy(fontFamily = if (field == IdentifierField.NOTE) LocalTextStyle.current.fontFamily else IdentifierFont),
                 onValueChange = { editedValue = it },
                 label = { Text(if (field == IdentifierField.NOTE) tr(TextKey.REVIEW_NOTE) else tr(TextKey.FINAL_IDENTIFIER, fieldLabel)) },
                 supportingText = {
@@ -471,7 +474,7 @@ class ScanActivity : LocalizedActivity() {
             if (field != IdentifierField.NOTE) CharacterReview(editedValue) { editedValue = it }
             Text(tr(TextKey.RAW_RECOGNIZED_TEXT), fontWeight = FontWeight.SemiBold)
             Surface(color = Color(0xFFEAF0F7), shape = RoundedCornerShape(8.dp)) {
-                Text(rawText.ifBlank { tr(TextKey.NO_TEXT_RECOGNIZED) }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                Text(rawText.ifBlank { tr(TextKey.NO_TEXT_RECOGNIZED) }, modifier = Modifier.fillMaxWidth().padding(14.dp), fontFamily = if (field == IdentifierField.NOTE) FontFamily.Monospace else IdentifierFont, fontSize = 14.sp)
             }
             Spacer(Modifier.height(8.dp))
         }

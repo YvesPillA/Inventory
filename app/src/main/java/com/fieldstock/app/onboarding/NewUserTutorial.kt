@@ -1,5 +1,7 @@
 package com.fieldstock.app.onboarding
 
+import com.fieldstock.app.IdentifierFont
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,7 +27,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -153,7 +154,7 @@ private fun TutorialPreview(index: Int) {
                                 drawLine(Teal, Offset(x, y), Offset(x, y + if (y == 0f) arm else -arm), stroke)
                             }
                         }
-                        Text("AB01-0009", fontFamily = FontFamily.Monospace, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Petrol)
+                        Text("AB01-0009", fontFamily = IdentifierFont, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Petrol)
                     }
                     Text(tr(TextKey.TUTORIAL_SCAN_FLOW), fontSize = 13.sp, lineHeight = 20.sp, color = Teal)
                 }
@@ -181,7 +182,7 @@ private fun TutorialAction(number: String, label: String, accent: Boolean = fals
 private fun TutorialExample(label: String, identifier: String, detail: String) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(label, color = Teal, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        Text(identifier, fontFamily = FontFamily.Monospace, color = Petrol, fontSize = 18.sp)
+        Text(identifier, fontFamily = IdentifierFont, color = Petrol, fontSize = 18.sp)
         Text(detail, color = Ink, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
